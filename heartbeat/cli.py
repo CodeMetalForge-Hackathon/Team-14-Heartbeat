@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
 import re
 import sys
+import threading
 import time
 
 import numpy as np
@@ -18,7 +20,7 @@ from .classify import make_classifier
 from .config import load_profile
 from .events import EventBus
 from .onset import OnsetDetector
-from .runner import Pipeline
+from .runner import DialogSession, Pipeline, run_simulation
 from .synth import scene
 
 
@@ -60,6 +62,23 @@ def _parser() -> argparse.ArgumentParser:
     synth.add_argument("--seconds", type=_positive_float)
     synth.add_argument("--seed", type=int)
     synth.add_argument("--profile", default="rubble")
+    run = commands.add_parser("run", help="run the sentinel challenge and interview")
+    source = run.add_mutually_exclusive_group()
+    source.add_argument("--device", type=_device)
+    source.add_argument("--wav", type=Path)
+    run.add_argument("--knocker", default="auto", help="auto, manual, speaker, or serial port")
+    run.add_argument("--speaker-device", type=_device)
+    run.add_argument("--auto", action="store_true", help="automatically challenge and interview")
+    run.add_argument("--profile", default="rubble")
+    sim = commands.add_parser("sim", help="simulate a survivor through the real audio pipeline")
+    sim.add_argument("--people", type=int, default=2)
+    sim.add_argument("--can-move", choices=["yes", "no"], default="yes")
+    sim.add_argument("--hurt", choices=["yes", "no"], default="yes")
+    sim.add_argument("--no-survivor", action="store_true")
+    sim.add_argument("--noise", action="store_true")
+    sim.add_argument("--realtime", action="store_true")
+    sim.add_argument("--seed", type=int, default=1)
+    sim.add_argument("--profile", default="rubble")
     return parser
 
 
@@ -255,6 +274,94 @@ def _synth(args, profile) -> int:
     return 0
 
 
+class _DialogConsole:
+    def __call__(self, event) -> None:
+        data = event.data
+        text = None
+        if event.type == "state":
+            text = f"{data.get('state', '?')}  status={data.get('status', '?')}"
+        elif event.type == "round_result":
+            text = (f"round {data['round']}: expected {data['expected']}, heard {data['heard']}  "
+                    f"{'match' if data['matched'] else 'no match'}  {data['odds']}")
+        elif event.type == "answer":
+            names = {"q_people": "people", "q_move": "can_move", "q_hurt": "hurt"}
+            text = f"{names.get(data['question'], data['question'])}={data['value']}"
+        elif event.type == "approval":
+            text = "operator approved"
+        if text is not None:
+            print(f"{event.t:7.2f}s  {text}", flush=True)
+
+
+def _operator_input(session, pipeline) -> None:
+    commands = {"c": "challenge", "i": "interview", "r": "reset", "a": "approve"}
+    try:
+        for line in sys.stdin:
+            key = line.strip().lower()
+            if key == "q":
+                pipeline.call_soon(pipeline.stop)
+                return
+            if key in commands:
+                session.command(commands[key])
+    except (OSError, ValueError):
+        # Noninteractive stdin may be unavailable; Ctrl-C still stops the run.
+        return
+
+
+def _run(args, profile, bus) -> int:
+    from .prompter import make_prompter
+
+    if args.auto:
+        profile = replace(profile, dialog=dict(profile.dialog, auto_challenge=True, auto_interview=True))
+    bus.subscribe(_DialogConsole())
+    errors = []
+    bus.subscribe(lambda event: errors.append(event)
+                  if event.type == "error" and event.data.get("severity") != "warning" else None)
+    cfg = profile.audio
+    source = (WavSource(args.wav, realtime=True, block=cfg.block) if args.wav is not None
+              else MicSource(args.device, block=cfg.block, bus=bus, cfg=cfg))
+    classifier = make_classifier(profile, bus=bus)
+    if type(classifier).__name__ == "PassThroughClassifier":
+        print("Warning: passthrough classifier counts every transient; use the challenge results.",
+              file=sys.stderr)
+    pipeline = Pipeline(source, OnsetDetector(profile.onset), classifier, bus, profile)
+    prompter = make_prompter(
+        args.knocker, bus, cfg=profile.prompter, clock=lambda: pipeline.t,
+        speaker_device=args.speaker_device,
+    )
+    session = DialogSession(pipeline, prompter)
+    print("Keys then Enter: c challenge, i interview, r reset, a approve, q quit.", flush=True)
+    threading.Thread(target=_operator_input, args=(session, pipeline), daemon=True,
+                     name="heartbeat-stdin").start()
+    try:
+        pipeline.run()
+    finally:
+        session.close()
+    return 1 if errors else 0
+
+
+def _sim(args, profile, bus) -> int:
+    if args.people < 0:
+        raise ValueError("people must be nonnegative")
+    bus.subscribe(_DialogConsole())
+    result = run_simulation(
+        profile, people=args.people, can_move=args.can_move, hurt=args.hurt,
+        no_survivor=args.no_survivor, noise=args.noise,
+        realtime=args.realtime, seed=args.seed, bus=bus,
+    )
+    snap = result.snapshot
+    answers = snap["answers"]
+    print(f"Simulation ended at {result.t:.2f}s: {snap['status']} ({snap['state']}), {snap['odds']}.")
+    if any(event.type == "error" and event.data.get("severity") != "warning"
+           for event in result.events):
+        return 1
+    if args.no_survivor:
+        complete = result.t >= profile.prompter["sim_no_survivor_duration_s"]
+        return 0 if result.confirmed_t is None and complete else 1
+    expected_people = args.people if args.people else "no answer"
+    expected = {"q_people": expected_people, "q_move": args.can_move, "q_hurt": args.hurt}
+    return 0 if result.confirmed_t is not None and all(answers.get(k) == v for k, v in expected.items()) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     bus = EventBus()
@@ -267,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
             return _listen(args, profile, bus)
         if args.command == "record":
             return _record(args, profile, bus)
+        if args.command == "run":
+            return _run(args, profile, bus)
+        if args.command == "sim":
+            return _sim(args, profile, bus)
         return _synth(args, profile)
     except KeyboardInterrupt:
         return 130

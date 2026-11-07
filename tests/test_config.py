@@ -13,7 +13,7 @@ def test_named_profile_and_reserved_sections():
     assert profile.onset.threshold_db == 12
     assert profile.classifier.name == "none"
     assert profile.classifier.threshold == 0.5
-    assert profile.dialog == profile.prompter == profile.server == {}
+    assert profile.dialog["first_pattern"] == 3 and profile.prompter["gate_tail_s"] == 0.6 and profile.server == {}
 
 
 def test_custom_profile_inherits_and_preserves_future_sections(tmp_path):
@@ -22,7 +22,7 @@ def test_custom_profile_inherits_and_preserves_future_sections(tmp_path):
     profile = load_profile(path)
     assert profile.onset.threshold_db == 14
     assert profile.onset.highpass_hz == 60
-    assert profile.dialog == {"future_key": 42}
+    assert profile.dialog == {**load_profile("rubble").dialog, "future_key": 42}
 
 
 @pytest.mark.parametrize("text,match", [

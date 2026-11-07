@@ -127,9 +127,103 @@ classifier:
   name: none
   # Minimum classifier score accepted as a knock.
   threshold: 0.5
-# Reserved for P03's deterministic challenge-response engine.
-dialog: {}
-# Reserved for P03's voice and knocker configuration.
-prompter: {}
+dialog:
+  # Profile name included in dialog snapshots.
+  profile: rubble
+  # Sliding stream-time horizon for passive background observations, in seconds.
+  rate_window_s: 600.0
+  # Pseudo-count in the background-rate prior.
+  prior_events: 1.0
+  # Prior exposure in seconds; one event per minute before observations.
+  prior_s: 60.0
+  # Minimum background event rate, in events per second.
+  lambda_floor: 0.0016666666666666668
+  # Minimum spontaneous knocks that raise the status to POSSIBLE.
+  burst_knocks: 2
+  # Sliding interval for a spontaneous burst, in seconds.
+  burst_window_s: 4.0
+  # Quiet interval after a burst before an automatic challenge, in seconds.
+  quiet_s: 1.5
+  # Start challenges automatically after a spontaneous burst when enabled.
+  auto_challenge: false
+  # Number of knocks in the first challenge round.
+  first_pattern: 3
+  # Later challenge counts; the preceding count is excluded when choosing.
+  patterns: [2, 3, 4]
+  # Interval between prompt knocks, in seconds.
+  interval_s: 0.6
+  # Maximum challenge response window, in seconds.
+  window_s: 6.0
+  # End a nonempty response window after this much quiet, in seconds.
+  early_close_s: 2.0
+  # Minimum matched rounds required for confirmation.
+  min_matched_rounds: 2
+  # Maximum combined independent-background match probability for confirmation.
+  p_confirm: 0.0001
+  # Maximum challenge rounds before NO_RESPONSE.
+  max_rounds: 4
+  # Consecutive empty response windows before NO_RESPONSE.
+  max_empty_windows: 2
+  # Pause after NO_RESPONSE before returning to passive listening, in seconds.
+  cooldown_s: 5.0
+  # Automatically interview after a confirmed challenge.
+  auto_interview: true
+  # Maximum interview response window, in seconds.
+  question_window_s: 10.0
+  # End a nonempty interview window after this much quiet, in seconds.
+  question_early_close_s: 3.0
+  # Ordered interview voice keys.
+  questions: [q_people, q_move, q_hurt]
+prompter:
+  # Continue suppressing prompt sounds for this many seconds after completion.
+  gate_tail_s: 0.6
+  # Directory of pre-generated voice WAVs, relative to the repository root.
+  voice_dir: assets/voice
+  # Extra operator time after the estimated manual knock duration, in seconds.
+  manual_knock_tail_s: 0.5
+  # Speaking speed used to estimate manual voice duration, in words per second.
+  manual_voice_words_per_s: 2.5
+  # Minimum estimated duration of a manual voice prompt, in seconds.
+  manual_voice_min_s: 1.0
+  # Maximum wait for the serial device's boot READY line, in seconds.
+  serial_ready_timeout_s: 2.0
+  # Added timeout margin after the expected serial knock duration, in seconds.
+  serial_reply_margin_s: 2.0
+  # Maximum wait for a serial PONG during auto-discovery, in seconds.
+  serial_ping_timeout_s: 0.5
+  # Maximum blocking interval of one serial read, in seconds.
+  serial_read_poll_s: 0.05
+  # Maximum blocking interval of one serial write, in seconds.
+  serial_write_timeout_s: 1.0
+  # Earliest simulated response after prompt completion, in seconds.
+  fake_reply_delay_min_s: 1.0
+  # Latest simulated response after prompt completion, in seconds.
+  fake_reply_delay_max_s: 1.5
+  # Maximum simulated timing jitter of each response knock, in seconds.
+  fake_jitter_s: 0.08
+  # Simulated response spacing, in seconds; separates classifier clips despite jitter.
+  fake_knock_interval_s: 1.1
+  # Gain applied to synthetic survivor response knocks, in dB.
+  fake_knock_gain_db: -3.0
+  # Maximum duration of a survivor simulation, in stream seconds.
+  sim_duration_s: 60.0
+  # Duration of a simulation without a survivor, in stream seconds.
+  sim_no_survivor_duration_s: 600.0
+  # Synthetic simulation background RMS level, in dBFS.
+  sim_background_dbfs: -50.0
+  # Duration of a synthetic background generation chunk, in seconds.
+  sim_chunk_s: 1.0
+  # Initial spontaneous survivor knocks that invite a challenge, in seconds.
+  sim_initial_knock_times_s: [0.8, 1.9]
+  # Gain applied to the initial spontaneous survivor knocks, in dB.
+  sim_initial_knock_gain_db: -6.0
+  # Time of the first distractor when simulation noise is enabled, in seconds.
+  sim_noise_first_s: 0.6
+  # Spacing between simulation distractors, in seconds.
+  sim_noise_interval_s: 2.7
+  # Gain applied to simulation distractors, in dB.
+  sim_noise_gain_db: -12.0
+  # Repeating distractor sequence when simulation noise is enabled.
+  sim_noise_kinds: [footstep, speech_like, drop]
 # Reserved for P04's dashboard server configuration.
 server: {}
