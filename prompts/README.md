@@ -10,12 +10,12 @@ Run two Codex sessions in parallel. They never edit the same files.
 | **P01** scaffold, audio, onset detector, recorder | **P02** servo knocker firmware (start now) |
 | **P03** dialog engine, stats, prompters, `hb sim` (needs P01) | **P05** classifier and data tools (needs P01, plus some recorded data) |
 | **P04** black box and dashboard (needs P03) | **P07** M5StickC Plus SE as the microphone (needs P05) |
-| **P06** Pi deploy, doctor, bench (needs P04) | |
+| **P06** Pi deploy, doctor, bench (needs P04) | **P08** rover bridge + patrol (needs P07) |
 
 **Lane C** (third session, in parallel): **FIX-01**, dialog noise guards and fast-knock features, from the P03/P05 review.
 
 Later prompts get written after we see these results:
-- P08: rover bridge for the mBot Ranger (stop → listen → move)
+
 - P09: LoRa link, or a wireless (Wi-Fi) stick node
 - P10: mmWave breathing
 - P11: SLM field brain and orchestrator

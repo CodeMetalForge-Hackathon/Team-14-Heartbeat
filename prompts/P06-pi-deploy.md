@@ -70,3 +70,18 @@ A phone on the same Wi-Fi or hotspot opens the dashboard. We also need numbers f
 - `uv run hb doctor` and `uv run hb bench` work on the Mac.
 
 Commit `P06: Pi deploy, doctor, bench`. Report the exact commands the human runs on the Pi. They will paste back the `hb doctor` and `hb bench` output.
+
+## Notes from the P04/P07/FIX-01 review (read before starting)
+- **The mic is now the M5StickC Plus SE (`--device stick`, from P07).**
+  - `hb doctor` must find the stick by its `PONG stickmic v1` reply, and check that it streams 2 s of non-silent 16 kHz audio.
+  - It must also list the knocker (`PONG knocker v1`) and the rover (`PONG rover v1`, from P08) by their replies, never by port name.
+  - On the Pi these show up as `/dev/ttyUSB*` or `/dev/ttyACM*`.
+- **The Pi 5 has no audio output jack.** If no USB or Bluetooth speaker is found, `hb run` on the Pi must still work with knock-only prompts:
+  - voice prompts are skipped, with one clear warning and an `error`-severity `warning` event
+  - never crash
+  - put the setting in the profile (`prompter.voice: auto|none`), not in code
+- **The systemd service:**
+  - command: `hb run --device stick --knocker auto --dashboard --auto`
+  - `--extra ml` installed
+  - default classifier `auto`
+- **`hb bench`** must report which classifier ran, because the result depends on whether the trained head is present.
