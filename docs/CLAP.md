@@ -1,5 +1,8 @@
 # Streaming CLAP
 
+For continuous screaming, crying, shouting, speech, and optional help-phrase
+observations alongside knocks, see [DISTRESS.md](DISTRESS.md).
+
 Select `--profile clap` to replace the classifier in the existing Heartbeat
 pipeline. The M5Stick keeps streaming; Heartbeat detects each impact and sends
 its audio directly from memory to a separate CLAP process. No recording command,

@@ -14,7 +14,7 @@ RESPONSE_BYTES = 65536  # Bound JSON responses from a configured inference endpo
 def validate_clap(settings):
     required = {"endpoint", "timeout_s", "max_pending", "max_lag_s", "model",
                 "revision", "device", "cpu_threads", "positive_prompts", "negative_prompts"}
-    if not isinstance(settings, dict) or set(settings) != required:
+    if not isinstance(settings, dict) or set(settings) - {"monitor"} != required:
         raise ValueError(f"classifier.clap requires exactly: {', '.join(sorted(required))}")
     endpoint = urlsplit(settings["endpoint"])
     if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.username
@@ -39,4 +39,38 @@ def validate_clap(settings):
         prompts.extend(values)
     if len(prompts) != len(set(prompts)):
         raise ValueError("CLAP descriptions must be unique across both groups")
+    if settings.get("monitor") is not None:
+        validate_monitor(settings["monitor"])
     return settings
+
+
+def validate_monitor(cfg):
+    required = {"enabled", "window_s", "hop_s", "threshold", "min_dbfs", "cooldown_s",
+                "timeout_s", "prompts", "asr"}
+    if not isinstance(cfg, dict) or set(cfg) != required or type(cfg["enabled"]) is not bool:
+        raise ValueError("Invalid CLAP monitor configuration")
+    for key in ("window_s", "hop_s", "threshold", "min_dbfs", "cooldown_s", "timeout_s"):
+        value = cfg[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"monitor.{key} must be finite")
+    if not (1 <= cfg["window_s"] <= 10 and 0 < cfg["hop_s"] <= cfg["window_s"]
+            and 0 < cfg["threshold"] <= 1 and -120 <= cfg["min_dbfs"] <= 0
+            and cfg["cooldown_s"] >= 0 and cfg["timeout_s"] > 0
+            and round(cfg["hop_s"] * SAMPLE_RATE) >= 1):
+        raise ValueError("CLAP monitor values out of range")
+    prompts = cfg["prompts"]
+    if not isinstance(prompts, dict) or set(prompts) != {"SCREAM", "SHOUT", "CRYING", "SPEECH", "OTHER"}:
+        raise ValueError("Monitor requires SCREAM, SHOUT, CRYING, SPEECH, OTHER prompts")
+    values = [p for group in prompts.values() if isinstance(group, list) for p in group]
+    if (any(not isinstance(group, list) or not group for group in prompts.values())
+            or any(not isinstance(p, str) or not p.strip() for p in values)
+            or len(values) != len(set(values))):
+        raise ValueError("Monitor descriptions must be nonempty and unique")
+    asr = cfg["asr"]
+    if (not isinstance(asr, dict) or set(asr) != {"enabled", "model", "revision", "phrases"}
+            or type(asr["enabled"]) is not bool
+            or any(not isinstance(asr[k], str) or not asr[k].strip() for k in ("model", "revision"))
+            or not isinstance(asr["phrases"], list) or not asr["phrases"]
+            or any(not isinstance(p, str) or not p.strip() for p in asr["phrases"])):
+        raise ValueError("Invalid optional speech recognizer settings")
+    return cfg

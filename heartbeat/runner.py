@@ -48,6 +48,12 @@ class Pipeline:
         self._inference = None
         self._pending_inference = deque()
         self.inference_failed = False
+        self._monitor = None
+        monitor_cfg = getattr(classifier, "settings", {}).get("monitor")
+        if monitor_cfg and monitor_cfg["enabled"]:
+            from .audio_monitor import AudioMonitor
+            self._monitor = AudioMonitor(classifier, bus, monitor_cfg, profile.prompter["gate_tail_s"])
+            self.on_audio.append(self._monitor.feed)
 
     @property
     def detection_watermark(self):
@@ -236,6 +242,8 @@ class Pipeline:
                 self._poll_inference()
                 if self.inference_failed:
                     break
+                if self._monitor:
+                    self._monitor.poll(self._inference, can_submit=not self._pending_inference)
                 if self.t >= next_level / level_hz:
                     self.bus.publish(
                         "level",
@@ -261,6 +269,10 @@ class Pipeline:
             except Exception as exc:
                 self._error("detector.flush", exc)
             self._poll_inference(wait=True)
+            if self._monitor:
+                if not self._stop.is_set():
+                    self._monitor.poll(wait=True)
+                self._monitor.close()
             if self._inference is not None:
                 for _, future in self._pending_inference:
                     future.cancel()

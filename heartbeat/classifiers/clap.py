@@ -9,6 +9,7 @@ import numpy as np
 
 from ..clap_settings import CLIP_SAMPLES, PROTOCOL, RESPONSE_BYTES, SAMPLE_RATE, validate_clap
 from ..classify import Detection
+from ..audio_monitor import monitor_identity, decode_observation
 
 
 class ClapClassifier:
@@ -29,7 +30,8 @@ class ClapClassifier:
     def _http(self, path, data):
         request = Request(self.settings["endpoint"].rstrip("/") + path, data=data,
                           headers={"Content-Type": "application/octet-stream"})
-        with urlopen(request, timeout=self.settings["timeout_s"]) as response:
+        timeout = self.settings["monitor"]["timeout_s"] if path == "/observe" else self.settings["timeout_s"]
+        with urlopen(request, timeout=timeout) as response:
             content = response.read(RESPONSE_BYTES + 1)
         if len(content) > RESPONSE_BYTES:
             raise ValueError("CLAP response exceeded the protocol size limit")
@@ -41,6 +43,20 @@ class ClapClassifier:
                     "sample_rate": SAMPLE_RATE, "clip_samples": CLIP_SAMPLES}
         if not isinstance(response, dict) or any(response.get(key) != value for key, value in expected.items()):
             raise ValueError("CLAP service model, descriptions, or audio contract does not match this profile")
+        monitor = self.settings.get("monitor")
+        if monitor and monitor["enabled"] and response.get("monitor") != monitor_identity(monitor):
+            raise ValueError("Restart CLAP service with the matching distress profile")
+
+    def observe(self, clip):
+        cfg = self.settings["monitor"]
+        audio = np.asarray(clip, dtype="<f4")
+        if (audio.shape != (round(cfg["window_s"] * SAMPLE_RATE),)
+                or not np.isfinite(audio).all() or np.max(np.abs(audio)) > 1):
+            raise ValueError("Invalid monitor PCM")
+        body = audio.tobytes()
+        response = self._request("/observe", body)
+        self._validate_identity(response)
+        return decode_observation(cfg, response, body)
 
     def classify(self, onset):
         clip = np.asarray(onset.clip, dtype=np.float32)

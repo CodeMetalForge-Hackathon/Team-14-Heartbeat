@@ -170,6 +170,19 @@ class _ListenConsole:
 
     def __call__(self, event) -> None:
         data = event.data
+        if event.type == "audio_observation":
+            flag = " POSSIBLE DISTRESS — review" if data["alert"] else ""
+            print(f"{event.t:8.2f}s  {data['label']} score {data['score']:.2f}{flag}", flush=True)
+            if data.get("transcript"):
+                print(f"          Heard: {data['transcript']}", flush=True)
+            if data.get("matched_phrases"):
+                print(f"          HELP_PHRASE: {', '.join(data['matched_phrases'])}", flush=True)
+            if self.debug:
+                print(f"          Vocal scores: {data['scores']}", flush=True)
+            return
+        if event.type == "audio_monitor_status":
+            print(f"{event.t:8.2f}s  {data['message']} (skipped {data['skipped']})", flush=True)
+            return
         if event.type == "sound":
             label = "GATED" if data["gated"] else ("KNOCK" if data["is_knock"] else "REJECTED")
             line = (

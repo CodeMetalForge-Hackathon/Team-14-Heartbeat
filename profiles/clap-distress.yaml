@@ -1,0 +1,81 @@
+# Experimental CLAP service. Inherits the audio/dialog settings in rubble.yaml.
+# Start tools/clap_service.py before selecting this profile in hb listen/run.
+classifier:
+  # Explicit selection; does not change the default Pi/YAMNet/heuristic path.
+  name: clap
+  # Initial relative-score threshold only; calibrate on real short onset clips.
+  threshold: 0.6
+  clap:
+    # Change the host to the Jetson's LAN address for remote inference.
+    endpoint: http://127.0.0.1:8767
+    # Per-request transport timeout; failed inference stops this audio session.
+    timeout_s: 1.5
+    # Maximum queued/in-flight onset requests, including the active request.
+    max_pending: 4
+    # Maximum stream-time age from impact to result, including 0.875s look-ahead.
+    max_lag_s: 2.5
+    # Pretrained model already used in the exploratory five-second tester.
+    model: laion/clap-htsat-unfused
+    # Model repository revision; use the same value on service and client.
+    revision: main
+    # CPU on Mac; set cuda for a Jetson with a compatible GPU-enabled PyTorch.
+    device: cpu
+    # Torch CPU threads; benchmark rather than assuming more threads is faster.
+    cpu_threads: 2
+    # These descriptions together define the positive class.
+    positive_prompts:
+      - The sound of a person knocking on a table with their knuckles.
+      - The sound of a person banging on a table with their fist.
+    # Fixed comparison classes; changing descriptions also changes score meaning.
+    negative_prompts:
+      - The sound of an object being dropped or set down on a table.
+      - The sound of a table being accidentally bumped.
+      - The sound of a mechanical motor or servo clicking and tapping.
+      - The sound of footsteps.
+      - The sound of people talking or a speaker playing speech.
+      - The sound of music playing.
+      - The sound of typing on a keyboard.
+      - The sound of quiet background room noise.
+    # Continuous vocal observations; never fed to knock-pattern counting.
+    monitor:
+      # Enable alongside the existing knock classifier.
+      enabled: true
+      # Duration and interval of overlapping windows, in seconds.
+      window_s: 3.0
+      hop_s: 1.0
+      # Uncalibrated relative class-score cutoff.
+      threshold: 0.55
+      # Skip very quiet windows before classification/transcription.
+      min_dbfs: -50.0
+      # Minimum seconds between review alerts; observations still logged.
+      cooldown_s: 5.0
+      # Bound the monitor HTTP request, including optional transcription.
+      timeout_s: 3.0
+      # Vocal classes and ordinary comparison sounds are separate from knocks.
+      prompts:
+        SCREAM:
+          - The sound of a person screaming.
+        SHOUT:
+          - The sound of a person shouting loudly.
+        CRYING:
+          - The sound of a person crying and sobbing.
+        SPEECH:
+          - The sound of a person speaking normally.
+        OTHER:
+          - The sound of people laughing and cheering.
+          - The sound of music or television playing.
+          - The sound of machinery and motors running.
+          - The sound of knocking or objects banging on a table.
+          - The sound of quiet background room noise.
+      # Optional English transcription. Off avoids an extra model download.
+      asr:
+        enabled: false
+        model: openai/whisper-tiny.en
+        revision: main
+        # Whole-word phrase matching on normalized transcripts; not proof of distress.
+        phrases:
+          - help
+          - help me
+          - I am trapped
+          - I'm trapped
+          - over here
