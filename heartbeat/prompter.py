@@ -253,13 +253,15 @@ class SpeakerPrompter(_BasePrompter):
 
 class SerialKnocker(_BasePrompter):
     def __init__(self, port: str, *, bus=None, cfg=None, clock=None, serial_factory=None,
-                 monotonic=None, sleep=None, manual=None):
+                 monotonic=None, sleep=None, manual=None, exclude_ports=None):
         super().__init__(bus, cfg=cfg, clock=clock)
         self.port = port
         self.serial_factory = serial_factory
         self.monotonic = monotonic if monotonic is not None else time.monotonic
         self.manual = manual if manual is not None else ManualPrompter(bus, cfg=self.cfg, clock=clock, sleep=sleep)
         self._connection = None
+        self.exclude_ports = set(exclude_ports or ())
+        self._claim_key = None
 
     def _read_line(self, deadline: float) -> str | None:
         pending = bytearray()
@@ -286,13 +288,31 @@ class SerialKnocker(_BasePrompter):
     def _connect(self) -> None:
         if self._connection is not None and getattr(self._connection, "is_open", True):
             return
-        factory = self.serial_factory
-        if factory is None:
-            factory = importlib.import_module("serial").Serial
-        self._connection = factory(
-            self.port, baudrate=BAUD_RATE, timeout=self.cfg.serial_read_poll_s,
-            write_timeout=self.cfg.serial_write_timeout_s,
-        )
+        from .stickmic import canonical_port, claim_port, new_serial_connection
+
+        self.close()
+        claim_key = canonical_port(self.port)
+        if claim_key in {canonical_port(port) for port in self.exclude_ports}:
+            raise OSError(f"Serial port is excluded: {self.port}")
+        if not claim_port(claim_key):
+            raise OSError(f"Serial port is already in use: {self.port}")
+        self._claim_key = claim_key
+        try:
+            if self.serial_factory is None:
+                # Leave ESP32 reset lines inactive before opening a scan candidate.
+                self._connection = new_serial_connection(
+                    self.port, BAUD_RATE, self.cfg.serial_read_poll_s,
+                    write_timeout=self.cfg.serial_write_timeout_s,
+                )
+            else:
+                # Preserve the existing injected-factory contract for hardware-free callers.
+                self._connection = self.serial_factory(
+                    self.port, baudrate=BAUD_RATE, timeout=self.cfg.serial_read_poll_s,
+                    write_timeout=self.cfg.serial_write_timeout_s,
+                )
+        except Exception:
+            self.close()
+            raise
         deadline = self.monotonic() + self.cfg.serial_ready_timeout_s
         while self.monotonic() < deadline:
             line = self._read_line(deadline)
@@ -358,6 +378,11 @@ class SerialKnocker(_BasePrompter):
                 connection.close()
             except Exception as exc:
                 self._error(f"Knocker shutdown failed: {exc}", code="knocker_close_failed")
+        if self._claim_key is not None:
+            from .stickmic import release_port
+
+            release_port(self._claim_key)
+            self._claim_key = None
 
 
 class CompositePrompter:
@@ -424,7 +449,8 @@ class FakePrompter(_BasePrompter):
 
 
 def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=None,
-                  serial_factory=None, port_lister=None, audio=None, sleep=None, monotonic=None) -> Prompter:
+                  serial_factory=None, port_lister=None, audio=None, sleep=None, monotonic=None,
+                  exclude_ports=None) -> Prompter:
     cfg = PrompterConfig.from_dict(cfg)
     manual = ManualPrompter(bus, cfg=cfg, clock=clock, sleep=sleep)
     if spec == "manual":
@@ -437,7 +463,7 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
     def knocker(port):
         return SerialKnocker(
             port, bus=bus, cfg=cfg, clock=clock, serial_factory=serial_factory,
-            monotonic=monotonic, sleep=sleep, manual=manual,
+            monotonic=monotonic, sleep=sleep, manual=manual, exclude_ports=exclude_ports,
         )
 
     if spec == "speaker":
@@ -447,9 +473,16 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
     if spec != "auto":
         raise ValueError(f"Unknown prompter: {spec}")
     try:
+        from .stickmic import canonical_port, port_in_use
+
+        excluded = {canonical_port(port) for port in (exclude_ports or ())}
         ports = port_lister() if port_lister is not None else importlib.import_module("serial.tools.list_ports").comports()
         for port in sorted(ports, key=lambda item: str(getattr(item, "device", item))):
-            candidate = knocker(str(getattr(port, "device", port)))
+            device = str(getattr(port, "device", port))
+            if (getattr(port, "is_open", False)
+                    or canonical_port(device) in excluded or port_in_use(device)):
+                continue
+            candidate = knocker(device)
             if candidate.probe():
                 return CompositePrompter(speaker, candidate)
     except Exception as exc:

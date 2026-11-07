@@ -17,12 +17,14 @@ import time
 import numpy as np
 import soundfile as sf
 
-from .audio import MicSource, WavSource, list_devices
+from .audio import WavSource, list_devices
 from .classify import make_classifier
 from .config import load_profile
 from .events import EventBus
 from .onset import OnsetDetector
 from .runner import Pipeline, prepare_runtime, prepare_simulation, run_simulation
+from .sources import open_input
+from .stickmic import StickMicSource, StickStatusSink, find_stick_ports
 from .synth import scene
 
 
@@ -141,8 +143,8 @@ def _devices(bus) -> int:
     devices = list_devices(bus=bus)
     if not devices:
         print("No audio devices found.")
-        return 1 if failed else 0
-    print("  ID  input output  default  name")
+    else:
+        print("  ID  input output  default  name")
     for device in devices:
         defaults = []
         if device.get("is_default_input", device.get("default", False)):
@@ -154,7 +156,12 @@ def _devices(bus) -> int:
             f"{device['max_output_channels']:6d}  {','.join(defaults) or '-':7s}  "
             f"{device['name']}"
         )
-    return 0
+    sticks = find_stick_ports(bus=bus)
+    for port in sticks:
+        print(f"  stick:{port}  M5StickC Plus SE microphone (16000 Hz mono)")
+    if not sticks:
+        print("No available stick microphones found.")
+    return 1 if failed and not devices and not sticks else 0
 
 
 def _listen(args, profile, bus) -> int:
@@ -163,7 +170,7 @@ def _listen(args, profile, bus) -> int:
     source = (
         WavSource(args.wav, realtime=args.realtime, block=cfg.block)
         if args.wav is not None
-        else MicSource(device=args.device, block=cfg.block, bus=bus, cfg=cfg)
+        else open_input(args.device, cfg, bus)
     )
     pipeline = Pipeline(
         source, OnsetDetector(profile.onset), make_classifier(profile, bus=bus), bus, profile
@@ -211,7 +218,7 @@ def _record(args, profile, bus) -> int:
         lambda event: reported_errors.append(event)
         if event.type == "error" and event.data.get("severity") != "warning" else None
     )
-    source = MicSource(device=args.device, block=cfg.block, bus=bus, cfg=cfg)
+    source = open_input(args.device, cfg, bus)
     path, handle = _reserve_recording(args.label, args.surface, args.desc)
     target = None if args.seconds is None else round(args.seconds * cfg.sample_rate)
     frames = 0
@@ -372,16 +379,25 @@ def _run(args, profile, bus) -> int:
     runtime = prepare_runtime(
         profile,
         lambda: (WavSource(args.wav, realtime=True, block=cfg.block) if args.wav is not None
-                 else MicSource(args.device, block=cfg.block, bus=bus, cfg=cfg)),
+                 else open_input(args.device, cfg, bus)),
         lambda pipeline: make_prompter(
             args.knocker, bus, cfg=profile.prompter, clock=lambda: pipeline.t,
             speaker_device=args.speaker_device,
+            exclude_ports={pipeline.source.port} if isinstance(pipeline.source, StickMicSource) else set(),
         ),
         bus=bus, run_dir=_run_directory(args, profile), argv=getattr(args, "_argv", sys.argv),
     )
+    source = runtime.pipeline.source
     if type(runtime.pipeline.classifier).__name__ == "PassThroughClassifier":
         print("Warning: passthrough classifier counts every transient; use the challenge results.",
               file=sys.stderr)
+    status_sink = StickStatusSink(source) if isinstance(source, StickMicSource) else None
+    unsubscribe_status = bus.subscribe(status_sink) if status_sink is not None else None
+    if status_sink is not None:
+        def close_status():
+            unsubscribe_status()
+            status_sink.close()
+        runtime.on_close.append(close_status)
     print("Keys then Enter: c challenge, i interview, r reset, a approve, q quit.", flush=True)
     threading.Thread(target=_operator_input, args=(runtime.session, runtime.pipeline), daemon=True,
                      name="heartbeat-stdin").start()

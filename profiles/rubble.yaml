@@ -21,6 +21,10 @@ audio:
   record_clip_peak: 0.99
   # Warn when a recording's absolute peak is below this value.
   record_quiet_peak: 0.02
+  # Fixed stickmic v1 serial transport rate, in baud.
+  stick_baud: 921600
+  # Host gain applied to stick PCM before clipping to the audio contract, in dB.
+  stick_gain_db: 0.0
   synth:
     # Peak amplitude used to normalize individual generated sounds.
     peak: 0.8

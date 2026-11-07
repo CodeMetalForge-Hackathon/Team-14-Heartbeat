@@ -23,6 +23,8 @@ class AudioConfig:
     record_clip_peak: float
     record_quiet_peak: float
     synth: dict[str, Any]
+    stick_baud: int = 921600
+    stick_gain_db: float = 0.0
 
 
 @dataclass(frozen=True)

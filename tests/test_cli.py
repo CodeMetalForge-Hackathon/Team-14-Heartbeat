@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from heartbeat import cli
+from heartbeat import cli, sources
 
 
 class FakeMic:
@@ -47,7 +47,7 @@ def fake_recording(monkeypatch, tmp_path):
     FakeMic.reported_error = False
     FakeMic.instances = []
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "MicSource", FakeMic)
+    monkeypatch.setattr(sources, "MicSource", FakeMic)
     monkeypatch.setattr(cli, "_countdown", lambda seconds: None)
     return ["record", "--label", "knock", "--surface", " Brick / Wood ", "--desc", "Test #1"]
 
@@ -103,7 +103,7 @@ def test_record_partial_audio_survives_reported_device_failure(fake_recording, c
 
 
 def test_devices_uses_inventory_without_opening_input(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [], raising=False)
+    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [])
     monkeypatch.setattr(cli, "list_devices", lambda **kwargs: [{
         "index": 4, "name": "Test input", "max_input_channels": 1,
         "max_output_channels": 0, "is_default_input": True,
@@ -115,7 +115,8 @@ def test_devices_uses_inventory_without_opening_input(monkeypatch, capsys):
 
 
 def test_device_query_failure_is_an_error_event(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [], raising=False)
+    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [])
+
     def unavailable(*, bus):
         bus.publish("error", 0.0, message="audio backend unavailable")
         return []
@@ -147,7 +148,7 @@ def test_listen_synthetic_wav_never_opens_mic(monkeypatch, tmp_path, capsys):
     def no_microphone(*args, **kwargs):
         pytest.fail("WAV replay must not open a microphone")
 
-    monkeypatch.setattr(cli, "MicSource", no_microphone)
+    monkeypatch.setattr(sources, "MicSource", no_microphone)
     assert cli.main(["listen", "--wav", str(out)]) == 0
     output = capsys.readouterr().out
     assert "KNOCK" in output
