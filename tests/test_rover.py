@@ -82,7 +82,7 @@ def make_link(monkeypatch):
 
     def make(port=None, **kwargs):
         serial = Serial() if port is None else port
-        cfg = {"connect_timeout_s": 0.2, "command_timeout_s": 0.1,
+        cfg = {"boot_timeout_s": 0.2, "boot_ping_interval_s": 0.05, "command_timeout_s": 0.1,
                "move_timeout_s": 0.15, "heartbeat_s": 0.01, "read_timeout_s": 0.01}
         cfg.update(kwargs.pop("cfg", {}))
         link = rover.RoverLink("/dev/fake-rover", cfg=cfg, serial_factory=lambda: serial, **kwargs)
@@ -122,6 +122,114 @@ def test_no_constructor_io_and_no_reset_exclusive_open(make_link):
     assert link.ping()
     assert serial.open_settings == (False, False, True, 115200)
     assert serial.writes == ["PING", "PING"]
+
+
+class BootingSerial(Serial):
+    """Drop early PINGs like an Auriga bootloader, using only a local byte queue."""
+
+    def __init__(self, *, boot_delay=0.0, ready=True, answer_after=1, answer=True):
+        super().__init__()
+        self.boot_delay, self.send_ready = boot_delay, ready
+        self.answer_after, self.answer = answer_after, answer
+        self.ping_times = []
+        self.ready_at = None
+
+    def open(self):
+        super().open()
+        self.opened_at = time.monotonic()
+        self.ready_at = None
+
+    def read(self, n):
+        if (self.send_ready and self.ready_at is None
+                and time.monotonic() - self.opened_at >= self.boot_delay):
+            self.ready_at = time.monotonic()
+            self.push("READY rover v1")
+        return super().read(n)
+
+    def write(self, payload):
+        if payload == b"PING\n":
+            elapsed = time.monotonic() - self.opened_at
+            self.ping_times.append(elapsed)
+            if not self.answer or elapsed < self.boot_delay or len(self.ping_times) < self.answer_after:
+                with self.condition:
+                    self.writes.append("PING")
+                    self.condition.notify_all()
+                return len(payload)
+        return super().write(payload)
+
+
+def test_boot_ready_after_one_point_six_seconds_retries_ping_before_commands(make_link):
+    serial = BootingSerial(boot_delay=1.6)
+    link, _ = make_link(serial, cfg={"boot_timeout_s": 4.0, "boot_ping_interval_s": 0.5})
+    assert link.ping()
+    assert serial.ready_at is not None
+    assert any(t < 1.6 for t in serial.ping_times)  # Bootloader swallowed the first PING.
+    assert any(1.6 <= t < 1.9 for t in serial.ping_times)  # READY wakes retry before 2.0 s.
+    assert link.calibrate(18, 2.5)
+    assert link.stop()  # Patrol's initial STOP uses the same identified connection.
+    assert serial.writes[-2:] == ["CAL 18 2.5", "STOP"]
+
+
+def test_no_ready_board_answers_second_ping_within_boot_budget(make_link):
+    serial = BootingSerial(ready=False, answer_after=2)
+    link, _ = make_link(serial, cfg={"boot_timeout_s": 4.0, "boot_ping_interval_s": 0.5})
+    assert link.ping()
+    assert serial.ready_at is None and serial.writes == ["PING", "PING", "PING"]
+    assert 0.5 <= serial.ping_times[1] - serial.ping_times[0] < 0.8
+
+
+@pytest.mark.parametrize("ready", [False, True], ids=["silent", "ready_without_pong"])
+def test_boot_without_pong_reports_timeout_and_releases_port(make_link, ready):
+    serial = BootingSerial(ready=ready, answer=False)
+    bus, events = EventBus(), []
+    bus.subscribe(events.append)
+    link, _ = make_link(serial, bus=bus, cfg={"boot_timeout_s": 0.12, "boot_ping_interval_s": 0.04})
+    started = time.monotonic()
+    assert not link.drive(20)
+    assert time.monotonic() - started < 0.4
+    assert serial.writes and set(serial.writes) == {"PING"}
+    assert not serial.is_open and link._connection is None and link._claim_key is None
+    assert any(event.type == "error" and "boot handshake timed out" in event.data["message"]
+               and "PONG rover v1" in event.data["message"] for event in events)
+    successor, _ = make_link()
+    assert successor.ping()  # The failed link cannot retain the shared port claim.
+
+
+def test_ready_near_deadline_does_not_restart_boot_timeout(make_link):
+    serial = BootingSerial(boot_delay=0.14, answer=False)
+    link, _ = make_link(serial, cfg={"boot_timeout_s": 0.2, "boot_ping_interval_s": 0.5})
+    started = time.monotonic()
+    assert not link.ping()
+    assert serial.ready_at is not None and len(serial.ping_times) == 2
+    assert time.monotonic() - started < 0.32
+    assert not serial.is_open and link._claim_key is None
+
+
+def test_estop_aborts_boot_handshake_without_allowing_queued_motion(make_link):
+    serial = BootingSerial(ready=False, answer=False)
+    link, _ = make_link(serial, cfg={"boot_timeout_s": 0.12})
+    results = []
+    active = threading.Thread(target=lambda: results.append(link.drive(20)))
+    active.start()
+    assert serial.wait_command("PING")
+    assert not link.estop()  # An unresponsive board cannot acknowledge STOP.
+    active.join(1)
+    assert not active.is_alive() and results == [False]
+    assert link.estopped and not link.moving
+    assert not any(line.startswith(("DRIVE", "TURN")) for line in serial.writes)
+    assert not serial.is_open and link._claim_key is None
+
+
+@pytest.mark.parametrize("name", ["boot_timeout_s", "boot_ping_interval_s"])
+@pytest.mark.parametrize("value", [0, -1, float("inf"), True])
+def test_boot_timing_settings_require_positive_finite_numbers(name, value):
+    with pytest.raises(ValueError):
+        rover.FakeRover(cfg={name: value})
+
+
+def test_default_boot_budget_and_ping_interval_come_from_profile():
+    cfg = rover._config(None)
+    assert cfg.boot_timeout_s == 4.0 and cfg.boot_ping_interval_s == 0.5
 
 
 @pytest.mark.parametrize("method,args", [

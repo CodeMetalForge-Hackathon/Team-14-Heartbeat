@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 import math
 import threading
+import time
 from typing import Callable
 
 from .config import load_profile
@@ -81,6 +82,8 @@ class RoverConfig:
     read_timeout_s: float
     write_timeout_s: float
     connect_timeout_s: float
+    boot_timeout_s: float
+    boot_ping_interval_s: float
     command_timeout_s: float
     move_timeout_s: float
     heartbeat_s: float
@@ -246,6 +249,7 @@ class RoverLink(_Commands):
         self._stop_lock = threading.Lock()
         self._stopping = threading.Event()
         self._heartbeat_cancel = threading.Event()
+        self._boot_ready = threading.Event()
 
     def _write(self, connection, command, args=(), *, epoch=None):
         line = " ".join([command, *(format(value, ".10g") for value in args)])
@@ -288,6 +292,8 @@ class RoverLink(_Commands):
                     with self._lock:
                         if connection is not self._connection:
                             return
+                        if reply["kind"] == "READY":
+                            self._boot_ready.set()
                         if reply["kind"] == "ERR":
                             self._fail_pending(reply["reason"])
                         else:
@@ -363,13 +369,49 @@ class RoverLink(_Commands):
                 reset = getattr(connection, "reset_input_buffer", None)
                 if reset is not None:
                     reset()
-                self._reader = threading.Thread(target=self._read_loop, args=(connection,), daemon=True,
-                                                name="rover-replies")
-                self._reader.start()
-                self._perform("PING", (), self.cfg.connect_timeout_s)
+                self._boot_handshake(connection)
             except Exception:
                 self._disconnect()
                 raise
+
+    def _boot_handshake(self, connection):
+        # Auriga can reset even with inactive modem lines. Keep one PONG waiter
+        # installed throughout boot so a late reply cannot fall between retries.
+        waiter = _Pending("PING", ())
+        with self._lock:
+            self._boot_ready = threading.Event()
+            self._pending = waiter
+        deadline = time.monotonic() + self.cfg.boot_timeout_s
+        next_ping = time.monotonic()  # Fast path for a board that did not reset.
+        try:
+            self._reader = threading.Thread(target=self._read_loop, args=(connection,), daemon=True,
+                                            name="rover-replies")
+            self._reader.start()
+            while True:
+                if waiter.aborted:
+                    raise OSError("Rover boot handshake cancelled by STOP")
+                if waiter.done.is_set():
+                    if waiter.error:
+                        raise OSError(waiter.error)
+                    return waiter.reply
+                now = time.monotonic()
+                if now >= deadline:
+                    raise TimeoutError(
+                        "Rover boot handshake timed out waiting for PONG rover v1 "
+                        "after READY/PING retries"
+                    )
+                if self._boot_ready.is_set() or now >= next_ping:
+                    self._boot_ready.clear()
+                    self._write(connection, "PING")
+                    next_ping = time.monotonic() + self.cfg.boot_ping_interval_s
+                # The reader signals PONG/errors immediately. Poll READY within
+                # the existing read interval without changing serial settings.
+                waiter.done.wait(min(self.cfg.read_timeout_s,
+                                     max(0.0, min(next_ping, deadline) - time.monotonic())))
+        finally:
+            with self._lock:
+                if self._pending is waiter:
+                    self._pending = None
 
     def _heartbeat(self, connection, cancel):
         while not cancel.wait(self.cfg.heartbeat_s):

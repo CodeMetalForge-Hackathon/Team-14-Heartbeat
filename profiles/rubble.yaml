@@ -433,8 +433,12 @@ rover:
   read_timeout_s: 0.05
   # Bound command writes so STOP cannot wait indefinitely behind another write.
   write_timeout_s: 0.1
-  # Maximum wait for a rover identity handshake, in seconds.
+  # Legacy connection timeout retained for compatibility; startup uses boot_timeout_s.
   connect_timeout_s: 2.0
+  # Maximum total wait for boot and a valid rover PONG, in seconds.
+  boot_timeout_s: 4.0
+  # Repeat startup PING while waiting for READY/PONG, in seconds.
+  boot_ping_interval_s: 0.5
   # Maximum wait for a non-motion reply, in seconds.
   command_timeout_s: 3.0
   # Host motion timeout, in seconds; firmware independently stops after 30 seconds.
