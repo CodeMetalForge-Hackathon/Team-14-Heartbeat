@@ -212,7 +212,8 @@ def test_spontaneous_burst_becomes_possible_and_auto_challenges_after_quiet():
     assert actions == [] and engine.state == "PRE_LISTEN"
     actions = engine.tick(3.5 + engine.cfg.pre_listen_s)
     assert actions == [PromptVoice("copy_knocks"), PromptKnocks(3, engine.cfg.interval_s)]
-    assert engine.background.count == 2
+    assert engine.background.count == 0
+    assert engine.snapshot()["candidate_times"] == [1, 2]
     assert engine.background.observed_s == 3.5 + engine.cfg.pre_listen_s
 
 
@@ -345,7 +346,7 @@ def test_snapshot_and_events_are_json_serializable_and_do_not_expose_mutable_sta
     snapshot = engine.snapshot()
     assert set(snapshot) == {"state", "status", "round", "rounds", "combined_p", "odds",
                              "answers", "approved", "lambda_per_min", "profile",
-                             "noisy", "mu", "lambda_used_per_min"}
+                             "noisy", "mu", "lambda_used_per_min", "candidate", "candidate_times", "coaching"}
     json.dumps(events, allow_nan=False)
     json.dumps(snapshot, allow_nan=False)
     snapshot["rounds"][0]["knock_times"].append(999)

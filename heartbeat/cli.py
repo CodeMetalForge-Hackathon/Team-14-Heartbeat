@@ -24,7 +24,7 @@ from .events import EventBus
 from .onset import OnsetDetector
 from .runner import Pipeline, prepare_runtime, prepare_simulation, run_simulation
 from .sources import open_input
-from .stickmic import StickMicSource, StickStatusSink, find_stick_ports
+from .stickmic import StickMicSource, StickStatusSink, configure_stick, find_stick_ports
 from .synth import scene
 
 
@@ -42,12 +42,26 @@ def _device(value: str):
         return value
 
 
+def _stick_mag(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 255:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 255")
+    return number
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hb", description="Heartbeat: listen for people answering through debris."
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("devices", help="list audio devices and their defaults")
+    stick = commands.add_parser("stick", help="inspect the stick or persist its microphone gain")
+    stick.add_argument("--port", help="stick serial port; otherwise discover it")
+    stick.add_argument("--profile", default="rubble")
+    stick_commands = stick.add_subparsers(dest="stick_command", required=True)
+    stick_commands.add_parser("info", help="print identity and MAG when reported by firmware")
+    mag = stick_commands.add_parser("mag", help="set persistent on-device microphone magnification")
+    mag.add_argument("value", type=_stick_mag, metavar="1..255")
     listen = commands.add_parser("listen", help="print detected sounds")
     source = listen.add_mutually_exclusive_group()
     source.add_argument("--device", type=_device, help="input device index or name")
@@ -226,6 +240,21 @@ def _listen(args, profile, bus) -> int:
     return 1 if failed else 0
 
 
+def _stick(args, profile, bus) -> int:
+    port = args.port
+    if port is None:
+        ports = find_stick_ports(bus=bus)
+        if not ports:
+            raise ValueError("No stick microphone found; connect it or use hb stick --port <port>.")
+        if len(ports) != 1:
+            raise ValueError("Multiple stick microphones found; select one with hb stick --port <port>.")
+        port = ports[0]
+    for line in configure_stick(port, mag=args.value if args.stick_command == "mag" else None,
+                                baud=profile.audio.stick_baud):
+        print(line, flush=True)
+    return 0
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "unspecified"
 
@@ -352,6 +381,8 @@ class _DialogConsole:
             text = f"{names.get(data['question'], data['question'])}={data['value']}"
         elif event.type == "approval":
             text = "operator approved"
+        elif event.type == "operator" and data.get("command") == "all_quiet":
+            text = f"all quiet — {data.get('operator') or 'console operator'}"
         if text is not None:
             print(f"{event.t:7.2f}s  {text}", flush=True)
 
@@ -360,12 +391,16 @@ def _operator_input(session, pipeline) -> None:
     commands = {"c": "challenge", "i": "interview", "r": "reset", "a": "approve"}
     try:
         for line in sys.stdin:
-            key = line.strip().lower()
+            parts = line.strip().split(maxsplit=1)
+            key = parts[0].lower() if parts else ""
             if key == "q":
                 pipeline.call_soon(pipeline.stop)
                 return
             if key in commands:
                 session.command(commands[key])
+            elif key == "w":
+                session.command("all_quiet", operator=parts[1] if len(parts) > 1 else "console",
+                                challenge=True)
     except (OSError, ValueError):
         # Noninteractive stdin may be unavailable; Ctrl-C still stops the run.
         return
@@ -445,7 +480,8 @@ def _run(args, profile, bus) -> int:
             unsubscribe_status()
             status_sink.close()
         runtime.on_close.append(close_status)
-    print("Keys then Enter: c challenge, i interview, r reset, a approve, q quit.", flush=True)
+    print("Keys then Enter: c challenge, w [initials] all quiet → challenge, i interview, "
+          "r reset, a approve, q quit.", flush=True)
     threading.Thread(target=_operator_input, args=(runtime.session, runtime.pipeline), daemon=True,
                      name="heartbeat-stdin").start()
     try:
@@ -660,6 +696,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"matched {result['matched']}, missing {result['missing']}, new {result['new']}")
             return 0
         profile = load_profile(args.profile)
+        if args.command == "stick":
+            return _stick(args, profile, bus)
         if args.command == "rover":
             return _rover(args, profile, bus)
         if args.command == "patrol":

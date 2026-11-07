@@ -73,6 +73,32 @@ def test_long_inactive_gap_never_dilutes_noise_rate_with_unobserved_time():
     assert background.lambda_per_s == pytest.approx(3 / 66)
 
 
+def test_candidate_exclusion_removes_only_those_events_and_keeps_exposure():
+    background = rate()
+    background.observe(0, 20)
+    for t in (1, 2, 10, 19):
+        assert background.add(t)
+    background.exclude([1, 2, 999])
+    assert background.count == 2 and background.observed_s == 20
+    assert background.lambda_per_s == pytest.approx(3 / 80)
+    background.exclude([1, 2])  # A growing burst can name earlier members again.
+    assert background.count == 2
+
+
+def test_explicit_all_quiet_reset_discards_exposure_and_returns_to_prior():
+    background = rate()
+    background.observe(0, 20)
+    for t in range(20):
+        background.add(t)
+    assert background.lambda_per_s > 1 / 60
+    background.reset()
+    assert background.count == 0 and background.observed_s == 0
+    assert background.lambda_per_s == 1 / 60
+    assert not background.add(19)
+    background.observe(20, 23)
+    assert background.lambda_per_s == pytest.approx(1 / 63)
+
+
 def test_poisson_exact_match_matches_hand_calculation():
     mu = 0.1
     assert round_p(3, 3, 6, 1 / 60) == pytest.approx(math.exp(-mu) * mu ** 3 / math.factorial(3))

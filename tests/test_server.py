@@ -106,6 +106,9 @@ class FakeSession:
         if name == "challenge":
             self.engine.value.update(state="PROMPTING", status="POSSIBLE", round=1)
             actions = [{"action": "PromptKnocks", "n": 3, "interval_s": 0.5}]
+        elif name == "all_quiet":
+            self.engine.value.update(state="PRE_LISTEN", status="POSSIBLE", round=0)
+            self.bus.publish("operator", self.pipeline.t, command=name, **args)
         elif name == "approve" and self.engine.value["state"] == "CONFIRMED":
             self.engine.value["approved"] = True
             self.bus.publish("approval", self.pipeline.t, approved=True, operator=args.get("operator"))
@@ -162,6 +165,9 @@ def test_server_config_rejects_unknown_keys_and_invalid_bounds():
         ServerConfig.from_dict({"dashboard": {"reconnect_ms": 0}})
     with pytest.raises(ValueError, match="documented UI"):
         ServerConfig.from_dict({"dashboard": {"typo": 10}})
+    for level in (None, True, "loud", "WARNING"):
+        with pytest.raises(ValueError, match="log_level"):
+            ServerConfig.from_dict({"log_level": level})
 
 
 def test_server_serves_dashboard_and_local_assets(api):
@@ -210,6 +216,30 @@ def test_command_routes_to_processing_thread_and_returns_result(api):
     assert response.json()["state"]["state"] == "PROMPTING"
     assert response.json()["actions"][0]["n"] == 3
     assert session.commands == [("challenge", {}, pipeline.thread.ident)]
+
+
+@pytest.mark.parametrize("operator", [None, "AB"])
+def test_all_quiet_routes_operator_and_challenge_without_dropping_args(api, operator):
+    client, pipeline, session, _, _ = api
+    args = {"operator": operator, "challenge": True}
+    response = client.post("/api/command", json={"name": "all_quiet", "args": args})
+    assert response.status_code == 200
+    assert response.json()["state"]["state"] == "PRE_LISTEN"
+    assert response.json()["actions"] == []
+    assert session.commands == [("all_quiet", args, pipeline.thread.ident)]
+    events = client.get("/api/events").json()["events"]
+    assert [event["data"] for event in events if event["type"] == "operator"] == [
+        {"command": "all_quiet", **args},
+    ]
+
+
+def test_state_api_preserves_candidate_references_and_coaching_text(api):
+    client, pipeline, session, _, _ = api
+    data = {"candidate": True, "candidate_times": [1.0, 1.5], "coaching": True,
+            "text": "Hearing knocks: asking them to listen."}
+    pipeline.submit(lambda: session.engine.value.update(data))
+    state = client.get("/api/state").json()
+    assert {key: state[key] for key in data} == data
 
 
 def test_snapshot_cursor_does_not_hide_a_later_state_event(api, monkeypatch):
@@ -376,11 +406,13 @@ def test_slow_client_and_ingress_never_block_bus_or_serialize_on_producer(monkey
     asyncio.run(check())
 
 
-def test_run_server_uses_main_thread_without_opening_test_socket(tmp_path, monkeypatch):
+@pytest.mark.parametrize("log_level", [None, "debug"])
+def test_run_server_uses_main_thread_without_opening_test_socket(tmp_path, monkeypatch, log_level):
     import uvicorn
 
-    app, *_ = make_test_app(tmp_path)
+    app, *_ = make_test_app(tmp_path, cfg={} if log_level is None else {"log_level": log_level})
     calls = []
     monkeypatch.setattr(uvicorn, "run", lambda target, **kwargs: calls.append((target, kwargs)))
     run_server(app, host="127.0.0.1", port=9000)
-    assert calls == [(app, {"host": "127.0.0.1", "port": 9000})]
+    assert calls == [(app, {"host": "127.0.0.1", "port": 9000,
+                           "access_log": False, "log_level": log_level or "warning"})]

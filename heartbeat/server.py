@@ -43,6 +43,7 @@ class ServerConfig:
     dashboard_sim_duration_s: float
     blackbox: dict
     dashboard: dict
+    log_level: str = "warning"
 
     @classmethod
     def from_dict(cls, value=None):
@@ -54,6 +55,7 @@ class ServerConfig:
         from .config import load_profile
 
         data = dict(load_profile("rubble").server)
+        data.setdefault("log_level", "warning")
         for name, item in (value or {}).items():
             data[name] = {**data[name], **item} if name in {"blackbox", "dashboard"} and isinstance(item, dict) else item
         expected = {item.name for item in fields(cls)}
@@ -65,6 +67,10 @@ class ServerConfig:
         for name in ("host", "sentinel_name", "runs_dir"):
             if not isinstance(data[name], str) or not data[name].strip():
                 raise ValueError(f"server.{name} must be a nonempty string")
+        if not isinstance(data["log_level"], str) or data["log_level"] not in {
+            "critical", "error", "warning", "info", "debug", "trace",
+        }:
+            raise ValueError("server.log_level must be critical, error, warning, info, debug or trace")
         for name in ("port", "event_history", "client_queue", "bridge_queue_events",
                      "events_default_limit", "events_max_limit"):
             if isinstance(data[name], bool) or not isinstance(data[name], int) or data[name] < 1:
@@ -564,4 +570,7 @@ def run_server(app, *, host=None, port=None):
     import uvicorn
 
     cfg = app.state.server_config
-    uvicorn.run(app, host=cfg.host if host is None else host, port=cfg.port if port is None else port)
+    uvicorn.run(
+        app, host=cfg.host if host is None else host, port=cfg.port if port is None else port,
+        access_log=False, log_level=cfg.log_level,
+    )

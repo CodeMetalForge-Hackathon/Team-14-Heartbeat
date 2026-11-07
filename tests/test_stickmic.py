@@ -834,28 +834,119 @@ def knocker_factory(clock, replies, opened):
 
 def test_knocker_auto_skips_exclusions_and_busy_ports_and_rejects_stick_pong(monkeypatch):
     clock, opened = Clock(), []
-    assert stickmic.claim_port("/dev/internal-busy")
+    assert stickmic.claim_port("/dev/ttyUSB-internal-busy")
     monkeypatch.setattr(stickmic, "_os_port_in_use",
-                        lambda port: port == stickmic.canonical_port("/dev/external-busy"))
-    replies = {"/dev/stick": b"PONG stickmic v1\n", "/dev/z-knocker": b"PONG knocker v1\n"}
+                        lambda port: port == stickmic.canonical_port("/dev/ttyUSB-external-busy"))
+    replies = {"/dev/ttyUSB-stick": b"PONG stickmic v1\n",
+               "/dev/ttyUSB-z-knocker": b"PONG knocker v1\n"}
     prompter = make_prompter(
-        "auto", exclude_ports={"/dev/excluded"},
+        "auto", exclude_ports={"/dev/ttyUSB-excluded"},
         serial_factory=knocker_factory(clock, replies, opened), monotonic=clock.monotonic,
-        port_lister=lambda: ["/dev/internal-busy", "/dev/external-busy", "/dev/excluded", *replies,
-                             SimpleNamespace(device="/dev/entry-busy", is_open=True)],
+        port_lister=lambda: ["/dev/ttyUSB-internal-busy", "/dev/ttyUSB-external-busy",
+                             "/dev/ttyUSB-excluded", *replies,
+                             SimpleNamespace(device="/dev/ttyUSB-entry-busy", is_open=True)],
         audio=SimpleNamespace(stop=lambda: None),
     )
     try:
         assert isinstance(prompter, CompositePrompter)
-        assert prompter.knocks.port == "/dev/z-knocker"
-        assert [port.port for port in opened] == ["/dev/stick", "/dev/z-knocker"]
+        assert prompter.knocks.port == "/dev/ttyUSB-z-knocker"
+        assert [port.port for port in opened] == ["/dev/ttyUSB-stick", "/dev/ttyUSB-z-knocker"]
         assert opened[0].is_open is False
         assert all(port.writes == [b"PING\n"] for port in opened)
-        assert stickmic.port_in_use("/dev/z-knocker")
-        assert not stickmic.port_in_use("/dev/stick")
+        assert stickmic.port_in_use("/dev/ttyUSB-z-knocker")
+        assert not stickmic.port_in_use("/dev/ttyUSB-stick")
     finally:
         prompter.close()
-    assert not stickmic.port_in_use("/dev/z-knocker")
+    assert not stickmic.port_in_use("/dev/ttyUSB-z-knocker")
+
+
+@pytest.mark.parametrize("device", ["/dev/cu.usbserial-2130", "/dev/cu.usbmodem201",
+                                   "/dev/cu.wchusbserial223", "/dev/ttyUSB0", "/dev/ttyACM0"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_knocker_discovery_skips_non_usb_ports_and_announces_one_exact_identity(
+    capsys, device, explicit,
+):
+    clock, opened, attempted = Clock(), [], []
+    bus, events = EventBus(), []
+    bus.subscribe(events.append)
+    excluded_names = ["/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.debug-console",
+                      "/dev/ttyS0", "/dev/ttyUSB-debug-console", "/dev/cu.Bluetooth-usbserial"]
+    construct = knocker_factory(clock, {device: b"PONG knocker v1\n"}, opened)
+
+    def factory(port, **kwargs):
+        attempted.append(port)
+        return construct(port, **kwargs)
+
+    backend = SimpleNamespace(check_output_settings=lambda **kwargs: None, stop=lambda: None)
+    prompter = make_prompter(
+        device if explicit else "auto", bus, clock=lambda: 12.5,
+        port_lister=lambda: [*excluded_names, device], serial_factory=factory,
+        monotonic=clock.monotonic, audio=backend,
+    )
+    try:
+        assert isinstance(prompter, CompositePrompter) and prompter.knocks.port == device
+        assert attempted == [device]
+        assert opened[0].writes == [b"PING\n"]
+        assert not any(event.type == "error" for event in events)
+        startup = [event for event in events if event.data.get("action") == "knocker_discovery"]
+        assert len(startup) == 1 and startup[0].type == "operator" and startup[0].t == 12.5
+        message = f"Knocker: {device} (PONG knocker v1)"
+        assert startup[0].data == {"source": "prompter", "action": "knocker_discovery",
+                                   "message": message, "port": device,
+                                   "reply": "PONG knocker v1", "backend": "serial"}
+        assert capsys.readouterr().out == message + "\n"
+    finally:
+        prompter.close()
+    assert not opened[0].is_open and not stickmic.port_in_use(device)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_knocker_discovery_announces_speaker_fallback_once(capsys, explicit):
+    from heartbeat.prompter import SpeakerPrompter
+
+    clock, opened = Clock(), []
+    bus, events = EventBus(), []
+    bus.subscribe(events.append)
+    device = "/dev/custom-knocker"  # Explicit ports do not require USB-like names.
+    prompter = make_prompter(
+        device if explicit else "auto", bus,
+        port_lister=lambda: ["/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.debug-console"],
+        serial_factory=knocker_factory(clock, {device: b"PONG stickmic v1\n"}, opened),
+        monotonic=clock.monotonic,
+        audio=SimpleNamespace(check_output_settings=lambda **kwargs: None, stop=lambda: None),
+    )
+    try:
+        assert isinstance(prompter, SpeakerPrompter)
+        assert len(opened) == int(explicit)
+        assert all(connection.writes == [b"PING\n"] and not connection.is_open for connection in opened)
+        assert not stickmic.port_in_use(device)
+        startup = [event for event in events if event.data.get("action") == "knocker_discovery"]
+        assert len(startup) == 1
+        assert startup[0].data["message"] == "No knocker found: using speaker knocks"
+        assert startup[0].data["port"] is None and startup[0].data["reply"] is None
+        assert startup[0].data["backend"] == "speaker"
+        assert capsys.readouterr().out == "No knocker found: using speaker knocks\n"
+    finally:
+        prompter.close()
+
+
+def test_knocker_discovery_reports_manual_fallback_when_speaker_is_unavailable(capsys):
+    from heartbeat.prompter import ManualPrompter
+
+    bus, events = EventBus(), []
+    bus.subscribe(events.append)
+
+    def unavailable(**kwargs):
+        raise OSError("fake speaker absent")
+
+    prompter = make_prompter("auto", bus, port_lister=lambda: [],
+                             audio=SimpleNamespace(check_output_settings=unavailable))
+    assert isinstance(prompter, ManualPrompter)
+    startup = [event for event in events if event.data.get("action") == "knocker_discovery"]
+    assert len(startup) == 1 and startup[0].data["backend"] == "manual"
+    assert startup[0].data["message"] == "No knocker found: using operator knocks"
+    assert capsys.readouterr().out == "No knocker found: using operator knocks\n"
+    prompter.close()
 
 
 @pytest.mark.parametrize("reply", [b"PONG stickmic v1\n", b"PONG knocker v1 extra\n",

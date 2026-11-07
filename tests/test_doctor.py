@@ -687,7 +687,7 @@ def _voice_prompter(profile, *, voice, backend, serial_enabled=True, **options):
     sleeps = []
     result = make_prompter(
         "auto", bus, cfg={**profile.prompter, "voice": voice}, clock=lambda: 12.5,
-        audio=backend, port_lister=lambda: ["/dev/fake-knocker"] if serial_enabled else [],
+        audio=backend, port_lister=lambda: ["/dev/ttyUSB-fake-knocker"] if serial_enabled else [],
         serial_factory=lambda *args, **kwargs: connection, sleep=sleeps.append,
         monotonic=clock.monotonic, **options,
     )
@@ -742,7 +742,8 @@ def test_voice_auto_without_output_skips_voices_and_keeps_manual_knocks(profile)
         assert sleeps == []
         prompter.run(PromptKnocks(2, 0.5))
         assert len(sleeps) == 1 and sleeps[0] > 0
-        operators = [event.data for event in events if event.type == "operator"]
+        operators = [event.data for event in events if event.type == "operator"
+                     and event.data.get("action") == "knocks"]
         assert len(operators) == 1 and operators[0]["action"] == "knocks" and operators[0]["n"] == 2
         _voice_warnings(events)
     finally:
@@ -775,7 +776,9 @@ def test_voice_auto_uses_available_output_and_preserves_serial_after_playback_fa
         assert queries and len(plays) == (1 if playback_fails else 2)
         assert all(call["blocking"] is True and call["samplerate"] == 16000 for call in plays)
         assert connection.writes == [b"PING\n", b"K 3 500\n"]
-        assert sleeps == [] and not any(event.type == "operator" for event in events)
+        assert sleeps == [] and not any(event.type == "operator"
+                                       and event.data.get("action") != "knocker_discovery"
+                                       for event in events)
         if playback_fails:
             _voice_warnings(events)
         else:

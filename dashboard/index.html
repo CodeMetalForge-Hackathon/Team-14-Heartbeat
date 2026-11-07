@@ -90,8 +90,13 @@
       </section>
 
       <section class="controls" aria-label="Operator controls">
+        <div class="operator-identity">
+          <label for="current-operator">Operator initials <span>(optional for all quiet)</span></label>
+          <input id="current-operator" name="operator" autocomplete="off" placeholder="XX">
+        </div>
         <div class="control-buttons">
           <button type="button" data-command="challenge" disabled>Challenge</button>
+          <button type="button" data-command="all_quiet" disabled>All quiet → Challenge</button>
           <button type="button" data-command="interview" disabled>Interview</button>
           <button type="button" data-command="reassure" disabled>Reassure</button>
           <button type="button" data-command="reset" class="quiet-button" disabled>Reset</button>

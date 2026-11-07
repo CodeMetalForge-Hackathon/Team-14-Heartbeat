@@ -157,6 +157,7 @@ class DialogEngine:
     def _initialize(self):
         self.state, self.status = "LISTENING", "NO_SIGNS"
         self._state_since = self._clock
+        self._last_listening: tuple[float, float] | None = None
         self.round = 0
         self.rounds: list[dict] = []
         self.combined_p = 1.0
@@ -167,6 +168,7 @@ class DialogEngine:
         self._empty_windows = 0
         self._burst: list[float] = []
         self._burst_ready = False
+        self._candidate_times: list[float] = []
         self._last_passive_knock = None
         self._cooldown_until = None
         self._awaiting_prompts = False
@@ -179,6 +181,7 @@ class DialogEngine:
         self._retry_at = None
         self._noisy_tries = 0
         self._noisy = False
+        self._coaching = False
         self._lambda_used = self.background.lambda_per_s
 
     def snapshot(self) -> dict:
@@ -190,6 +193,8 @@ class DialogEngine:
             "lambda_per_min": self.background.lambda_per_s * 60,
             "lambda_used_per_min": self._lambda_used * 60,
             "mu": self._lambda_used * self.cfg.window_s, "noisy": self._noisy,
+            "candidate": bool(self._candidate_times), "candidate_times": list(self._candidate_times),
+            "coaching": self._coaching,
             "profile": self.cfg.profile,
         }
 
@@ -212,13 +217,17 @@ class DialogEngine:
 
     def _emit_state(self, t):
         data = self.snapshot()
-        if self.state == "TOO_NOISY":
+        if self._coaching:
+            data["text"] = "Hearing knocks: asking them to listen."
+        elif self.state == "TOO_NOISY":
             data["text"] = "Too noisy: call for quiet."
         self._emit("state", float(t), data)
 
     def _transition(self, state, t, *, status=None):
         changed = state != self.state or (status is not None and status != self.status)
         if state != self.state:
+            if self.state == "LISTENING":
+                self._last_listening = (self._state_since, float(t))
             self._state_since = float(t)
         self.state = state
         if status is not None:
@@ -258,13 +267,25 @@ class DialogEngine:
         elif self._window is not None and self._window.opened <= t <= self._window.deadline:
             self._window.times.append(t)
             self._window.times.sort()
-        elif self.state == "LISTENING" and t >= self._state_since and t >= self._gate_until:
-            self._burst = [previous for previous in self._burst if previous >= t - self.cfg.burst_window_s]
-            self._burst.append(t)
-            self._last_passive_knock = t
+        elif ((self.state == "LISTENING" and t >= self._state_since)
+              or (self._last_listening is not None and self._last_listening[0] <= t <= self._last_listening[1])):
+            # Clips can arrive after an operator has already started pre-listen.
+            # Attribute those older onsets to their original passive search.
+            latest = max([t, *self._burst])
+            self._burst = [previous for previous in self._burst if previous >= latest - self.cfg.burst_window_s]
+            if t >= latest - self.cfg.burst_window_s:
+                self._burst.append(t)
+            self._last_passive_knock = max(t, self._last_passive_knock or t)
             if len(self._burst) >= self.cfg.burst_knocks:
-                self._burst_ready = True
-                self._transition("LISTENING", t, status="POSSIBLE")
+                self._burst_ready |= self.state == "LISTENING" and t >= self._state_since
+                self.background.exclude(self._burst)
+                self._candidate_times = sorted(self._burst)
+                if self.status != "CONFIRMED":
+                    self.status = "POSSIBLE"
+                # The original sound events are already logged. Timestamp
+                # references annotate every burst member, including its first
+                # provisionally isolated hit, without publishing sounds twice.
+                self._emit_state(t)
         return actions
 
     def tick(self, t: float) -> list[Action]:
@@ -328,6 +349,11 @@ class DialogEngine:
             if self.state == "NO_RESPONSE":
                 self._cooldown_until = t + self.cfg.cooldown_s
             self._resume_state = None
+        elif kind == "coaching":
+            self._coaching = False
+            if t >= self._retry_at:
+                return self._next_round(t)
+            self._transition("TOO_NOISY", t)
         return []
 
     def _start_challenge(self, t):
@@ -336,7 +362,7 @@ class DialogEngine:
         self._empty_windows = 0
         self._noisy_tries = 0
         self.approved = False
-        self._burst, self._burst_ready = [], False
+        self._burst_ready = False  # Retain timestamps for clips still arriving from LISTENING.
         return self._next_round(t)
 
     def _next_round(self, t):
@@ -351,13 +377,20 @@ class DialogEngine:
         self._lambda_used = max(self.background.lambda_per_s,
                                 pre_count / self.cfg.pre_listen_s, self.cfg.lambda_floor)
         self._noisy = pre_count >= self.cfg.max_pre_knocks or self._lambda_used * self.cfg.window_s > self.cfg.mu_max
-        if self._noisy:
+        coach = pre_count > 0 and self.status == "POSSIBLE"
+        if self._noisy or coach:
+            self._noisy = True
             self._noisy_tries += 1
             if self._noisy_tries >= self.cfg.max_noisy_tries:
                 self._cooldown_until = t + self.cfg.cooldown_s
                 self._transition("NO_RESPONSE", t)
             else:
                 self._retry_at = t + self.cfg.noisy_retry_s
+                if coach:
+                    self._coaching = True
+                    self._awaiting_prompts, self._prompt_kind = True, "coaching"
+                    self._transition("PROMPTING", t)
+                    return [PromptVoice("stop_and_listen")]
                 self._transition("TOO_NOISY", t)
             return []
         self._noisy_tries = 0
@@ -448,7 +481,8 @@ class DialogEngine:
             return self._error(self._clock, "operator command time must not precede current stream time", name)
         self._advance(t)
         allowed = {"challenge": set(), "interview": set(), "ask": {"q"},
-                   "reassure": set(), "reset": set(), "approve": {"operator"}}
+                   "reassure": set(), "reset": set(), "approve": {"operator"},
+                   "all_quiet": {"operator", "challenge"}}
         if not isinstance(name, str) or name not in allowed:
             return self._error(t, "unknown operator command", name)
         if set(args) - allowed[name]:
@@ -470,6 +504,29 @@ class DialogEngine:
             self.approved = True
             self._emit("approval", t, {"approved": True, "operator": operator})
             self._emit_state(t)
+            return []
+        if name == "all_quiet":
+            if self.state not in ("LISTENING", "NO_RESPONSE", "TOO_NOISY", "PRE_LISTEN") or not idle:
+                return self._error(t, "all_quiet requires an idle search state", name)
+            operator, challenge = args.get("operator"), args.get("challenge", True)
+            if operator is not None and not isinstance(operator, str):
+                return self._error(t, "operator initials must be a string", name)
+            if not isinstance(challenge, bool):
+                return self._error(t, "all_quiet.challenge must be boolean", name)
+            self._epoch_t = t
+            self.background.reset()
+            self._lambda_used = self.background.lambda_per_s
+            self._noisy, self._noisy_tries = False, 0
+            self._burst, self._burst_ready, self._last_passive_knock = [], False, None
+            self._pre_started, self._pre_times = None, []
+            self._retry_at = self._cooldown_until = None
+            self._emit("operator", t, {"command": name, "operator": operator, "challenge": challenge})
+            if challenge:
+                return self._start_challenge(t)
+            if self.state == "LISTENING":
+                self._emit_state(t)
+            else:
+                self._transition("LISTENING", t)
             return []
         if name == "challenge":
             if self.state not in ("LISTENING", "NO_RESPONSE") or not idle:

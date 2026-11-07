@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import struct
 import subprocess
 import sys
@@ -273,6 +274,64 @@ def _identify_stick(connection, deadline, monotonic, *, read=None):
         elif line.startswith(("PONG", "READY ")):
             raise OSError(f"Serial device is not a stick microphone: {line}")
     raise TimeoutError("No PONG stickmic v1 reply after STOP/flush/PING")
+
+
+def configure_stick(port: str, *, mag: int | None = None, baud: int = BAUD_RATE,
+                    serial_factory=None, monotonic=None) -> list[str]:
+    """Identify an idle stick or persist its microphone magnification, without START."""
+    if mag is not None and (isinstance(mag, bool) or not isinstance(mag, int) or not 1 <= mag <= 255):
+        raise ValueError("Stick magnification must be an integer from 1 to 255")
+    monotonic = monotonic or time.monotonic
+    claim = canonical_port(port)
+    if not claim_port(claim):
+        raise OSError(f"Serial port is already in use: {port}")
+    connection = None
+    reported_mag = None
+    pending = bytearray()
+    try:
+        connection = new_serial_connection(port, baud, READ_POLL_S, serial_factory=serial_factory)
+
+        def read(size):
+            nonlocal reported_mag
+            chunk = connection.read(size)
+            # Some firmware revisions include MAG in READY or a separate line.
+            # Observe those reports without adding an unsupported query command.
+            for byte in chunk:
+                if byte in (10, 13):
+                    line = pending.decode("ascii", errors="replace")
+                    pending.clear()
+                    if line.startswith(("READY stickmic v1", "PONG stickmic v1", "MAG ", "OK MAG ")):
+                        match = re.search(r"(?:^|\s)MAG(?:=|\s+)(\d{1,3})(?:$|\s)", line, re.I)
+                        if match and 1 <= int(match[1]) <= 255:
+                            reported_mag = int(match[1])
+                else:
+                    pending.append(byte)
+                    del pending[:-MAX_LINE_BYTES]
+            return chunk
+
+        _identify_stick(connection, monotonic() + READY_TIMEOUT_S, monotonic, read=read)
+        if mag is None:
+            read(MAX_LINE_BYTES)  # One bounded poll for optional trailing metadata.
+            return ["PONG stickmic v1"] + ([] if reported_mag is None else [f"MAG {reported_mag}"])
+        payload = f"MAG {mag}\n".encode("ascii")
+        if connection.write(payload) != len(payload):
+            raise OSError("Incomplete stick magnification command write")
+        connection.flush()
+        deadline = monotonic() + READY_TIMEOUT_S
+        expected = f"OK MAG {mag}"
+        while monotonic() < deadline:
+            reply = _read_line(connection, deadline, monotonic, read=read)
+            if reply == expected:
+                return [reply]
+            if reply is not None and reply.startswith(("ERR", "OK MAG")):
+                raise OSError(f"Stick magnification failed: {reply}")
+        raise TimeoutError(f"No {expected} reply from stick microphone")
+    finally:
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            release_port(claim)
 
 
 class StickMicSource:

@@ -27,6 +27,7 @@ from .events import EventBus
 
 VOICE_TEXT = {
     "copy_knocks": "Rescue team. If you can hear us, knock back the same number of times.",
+    "stop_and_listen": "We hear you. Stop knocking and listen. Then copy our knocks.",
     "we_hear_you": "We hear you. Help is coming. Save your strength.",
     "q_people": "Knock once for each person with you.",
     "q_move": "Can you move? Knock two times for yes. One time for no.",
@@ -513,10 +514,28 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
             monotonic=monotonic, sleep=sleep, manual=manual, exclude_ports=exclude_ports,
         )
 
+    def announce(port, backend):
+        message = (f"Knocker: {port} (PONG knocker v1)" if port is not None else
+                   f"No knocker found: using {'speaker' if backend == 'speaker' else 'operator'} knocks")
+        print(message, flush=True)
+        manual._emit("operator", source="prompter", action="knocker_discovery",
+                     message=message, port=port,
+                     reply="PONG knocker v1" if port is not None else None, backend=backend)
+
+    def fallback():
+        result = speaker_or_manual()
+        announce(None, "speaker" if result is speaker else "manual")
+        return result
+
     if spec == "speaker":
         return speaker_or_manual()
     if spec.startswith("/dev/") or re.fullmatch(r"COM[0-9]+", spec, re.IGNORECASE):
-        return CompositePrompter(voice_backend(), knocker(spec))
+        candidate = knocker(spec)
+        if candidate.probe():
+            result = CompositePrompter(voice_backend(), candidate)
+            announce(candidate.port, "serial")
+            return result
+        return fallback()
     if spec != "auto":
         raise ValueError(f"Unknown prompter: {spec}")
     try:
@@ -526,12 +545,19 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
         ports = port_lister() if port_lister is not None else importlib.import_module("serial.tools.list_ports").comports()
         for port in sorted(ports, key=lambda item: str(getattr(item, "device", item))):
             device = str(getattr(port, "device", port))
+            name = Path(device).name.casefold()
+            if ("bluetooth" in name or "debug" in name or
+                    not any(token in name for token in
+                            ("usbserial", "usbmodem", "wchusbserial", "ttyusb", "ttyacm"))):
+                continue
             if (getattr(port, "is_open", False)
                     or canonical_port(device) in excluded or port_in_use(device)):
                 continue
             candidate = knocker(device)
             if candidate.probe():
-                return CompositePrompter(voice_backend(), candidate)
+                result = CompositePrompter(voice_backend(), candidate)
+                announce(candidate.port, "serial")
+                return result
     except Exception as exc:
         manual._error(f"Serial discovery failed: {exc}", code="serial_scan_failed", severity="warning")
-    return speaker_or_manual()
+    return fallback()

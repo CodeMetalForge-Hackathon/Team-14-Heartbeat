@@ -7,7 +7,8 @@ Multiplying round probabilities is useful evidence under the model; it is not a
 calibrated posterior probability of humanity or a session-wide false alarm rate.
 Likelihood alone cannot reject high-rate or correlated noise. DialogEngine also
 requires quiet pre-listening, bounded expected background counts, a prompt start
-and silence after an answer. The rate object survives operator dialog resets.
+and silence after an answer. Ordinary dialog resets preserve noise memory;
+an explicit operator all-quiet declaration returns it to the configured prior.
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ class BackgroundRate:
     stream-time window. Inactive gaps never become quiet observation time.
     Retained intervals allow delayed detections from earlier passive listening.
     Callers include every ungated interval outside response windows, including
-    cooldowns and interview gaps; a dialog reset does not reset this estimator.
+    cooldowns and interview gaps. Candidate bursts can be excluded after their
+    first hit was provisionally counted. Only an explicit all-quiet declaration
+    resets this estimator; an ordinary dialog reset preserves it.
     """
 
     def __init__(self, rate_window_s: float, prior_events: float, prior_s: float, lambda_floor: float):
@@ -78,6 +81,18 @@ class BackgroundRate:
             insort(self._events, t)
             return True
         return False
+
+    def exclude(self, times) -> None:
+        """Remove retained candidate events without changing passive exposure."""
+        for t in times:
+            index = bisect_left(self._events, t)
+            if index < len(self._events) and self._events[index] == t:
+                del self._events[index]
+
+    def reset(self) -> None:
+        """Return to the prior at the current stream time after an all-quiet call."""
+        self._intervals.clear()
+        self._events.clear()
 
     @property
     def observed_s(self) -> float:

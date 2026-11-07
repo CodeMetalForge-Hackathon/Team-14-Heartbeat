@@ -530,7 +530,7 @@ def test_prompter_speaker_failure_emits_error_and_manual_fallback(tmp_path):
 def test_prompter_auto_discovers_using_ping_without_striking():
     clock = _PrompterClock()
     port = _PrompterPort(clock)
-    prompter = make_prompter('auto', port_lister=lambda: [_PrompterNamespace(device='/dev/fake')],
+    prompter = make_prompter('auto', port_lister=lambda: [_PrompterNamespace(device='/dev/ttyUSB-fake')],
                              serial_factory=lambda *args, **kwargs: port, monotonic=clock.monotonic,
                              audio=_PrompterNamespace())
     assert isinstance(prompter, CompositePrompter)

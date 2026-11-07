@@ -31,12 +31,17 @@ def _verify_file(path: Path) -> None:
         raise ValueError(f"{path} must use 16-bit PCM")
 
 
-def verify(directory: Path) -> None:
-    for key in (*VOICE_TEXT, "knock"):
+def verify(directory: Path, *, only: str | None = None) -> None:
+    keys = (*VOICE_TEXT, "knock") if only is None else (only,)
+    for key in keys:
+        if key not in VOICE_TEXT and key != "knock":
+            raise ValueError(f"Unknown voice prompt: {key}")
         _verify_file(directory / f"{key}.wav")
 
 
-def generate(directory: Path, *, voice: str | None = None) -> None:
+def generate(directory: Path, *, voice: str | None = None, only: str | None = None) -> None:
+    if only is not None and only not in VOICE_TEXT and only != "knock":
+        raise ValueError(f"Unknown voice prompt: {only}")
     mac = platform.system() == "Darwin"
     required = ("say", "afconvert") if mac else ("espeak-ng",)
     binaries = {name: shutil.which(name) for name in required}
@@ -48,6 +53,8 @@ def generate(directory: Path, *, voice: str | None = None) -> None:
     # replace a valid committed asset with a zero-frame output file.
     with tempfile.TemporaryDirectory(prefix=".heartbeat-voice-", dir=directory) as temporary:
         for key, text in VOICE_TEXT.items():
+            if only is not None and key != only:
+                continue
             source = Path(temporary) / (f"{key}.aiff" if mac else f"{key}.wav")
             target = Path(temporary) / f"{key}-converted.wav"
             if mac:
@@ -71,25 +78,28 @@ def generate(directory: Path, *, voice: str | None = None) -> None:
                 sf.write(target, np.clip(converted, -1, 1), SAMPLE_RATE, subtype="PCM_16")
             _verify_file(target)
             target.replace(directory / f"{key}.wav")
-        target = Path(temporary) / "knock.wav"
-        sf.write(target, knock(), SAMPLE_RATE, subtype="PCM_16")
-        _verify_file(target)
-        target.replace(directory / "knock.wav")
-    verify(directory)
+        if only is None or only == "knock":
+            target = Path(temporary) / "knock.wav"
+            sf.write(target, knock(), SAMPLE_RATE, subtype="PCM_16")
+            _verify_file(target)
+            target.replace(directory / "knock.wav")
+    verify(directory, only=only)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "assets" / "voice")
     parser.add_argument("--voice", help="Optional locally installed TTS voice")
+    parser.add_argument("--only", choices=(*VOICE_TEXT, "knock"), help="Generate or verify just this asset")
     parser.add_argument("--check", action="store_true", help="Verify existing files without generating speech")
     args = parser.parse_args(argv)
     try:
-        verify(args.out) if args.check else generate(args.out, voice=args.voice)
+        verify(args.out, only=args.only) if args.check else generate(args.out, voice=args.voice, only=args.only)
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
         parser.exit(1, f"Voice assets failed: {detail}\n")
-    print(f"Verified {len(VOICE_TEXT) + 1} voice assets in {args.out}")
+    count = 1 if args.only is not None else len(VOICE_TEXT) + 1
+    print(f"Verified {count} voice asset(s) in {args.out}")
     return 0
 
 

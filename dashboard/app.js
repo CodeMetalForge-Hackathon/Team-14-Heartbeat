@@ -45,6 +45,8 @@
       const command = button.dataset.command;
       const allowed = command === "reset" ||
         (command === "challenge" && ["LISTENING", "NO_RESPONSE"].includes(state?.state)) ||
+        (command === "all_quiet" && !state?.coaching &&
+          ["LISTENING", "NO_RESPONSE", "TOO_NOISY", "PRE_LISTEN"].includes(state?.state)) ||
         (command === "interview" && state?.state === "CONFIRMED") ||
         (command === "reassure" && idle);
       button.disabled = !(running && !patrol && allowed);
@@ -144,6 +146,9 @@
   }
   function phaseLabel(snapshot) {
     if (snapshot.pipeline_running === false) return "Session ended · recording available for review";
+    if (snapshot.coaching) return "Hearing knocks: asking them to listen.";
+    if (snapshot.state === "PRE_LISTEN") return "Listening for quiet before the challenge…";
+    if (snapshot.state === "TOO_NOISY") return "Too noisy: call for quiet.";
     if (snapshot.state === "RESPONSE_WINDOW") return `Round ${snapshot.round}: listening for an answer…`;
     if (snapshot.state === "PROMPTING") return `Round ${snapshot.round || "—"}: sending the prompt…`;
     if (snapshot.state === "INTERVIEW") return "Interview: listening for knock answers…";
@@ -213,7 +218,7 @@
     switch (event.type) {
       case "sound": {
         const top = d.top?.[0]?.[0];
-        return `${d.gated ? "Our prompt / gated sound" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;
+        return `${d.gated ? "Our prompt / gated sound" : d.candidate ? "Candidate knock" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;
       }
       case "state": return `${String(d.state || "").replaceAll("_", " ")} · ${String(d.status || "").replaceAll("_", " ")}`;
       case "prompt_start": return "Sending prompt" + (d.actions ? ` · ${d.actions.map(a => a.key?.replaceAll("_", " ") || `${a.n} knocks`).join(", ")}` : "");
@@ -225,7 +230,9 @@
       case "patrol": return `Patrol: ${patrolPhase(d)}${d.gap ? ` · ${d.gap}` : ""}`;
       case "gap_result": return `${d.gap}: ${String(d.status || "").replaceAll("_", " ")} · ${d.odds || "—"}${d.arrival_unverified ? " · arrival unverified" : ""}`;
       case "patrol_done": return d.aborted ? "Patrol stopped" : "Patrol route complete";
-      case "operator": return d.message || `Operator: ${d.command || d.action || "command"}`;
+      case "operator": return d.message || (d.command === "all_quiet"
+        ? `All quiet declared${d.operator ? ` by ${d.operator}` : ""}`
+        : `Operator: ${d.command || d.action || "command"}`);
       case "error": return d.message || "An operation failed";
       case "session_start": return "Session started";
       case "session_end": return "Session ended";
@@ -251,6 +258,18 @@
       return row;
     }));
   }
+  function markCandidates(snapshot) {
+    const times = new Set(snapshot.candidate_times || []);
+    let changed = false;
+    for (const event of [...sounds, ...activity]) {
+      if (event.type === "sound" && event.data?.is_knock && !event.data.gated &&
+          !event.data.candidate && times.has(event.t)) {
+        event.data = {...event.data, candidate: true};
+        changed = true;
+      }
+    }
+    if (changed) renderLog();
+  }
   function ingest(event) {
     if (!event || typeof event.seq !== "number" || event.seq <= cursor) return;
     if (cursor && event.seq > cursor + 1) refreshState().catch(() => {});
@@ -265,7 +284,10 @@
       if (ui.event_log_limit) activity = activity.slice(-ui.event_log_limit);
       renderLog();
     }
-    if (event.type === "sound") sounds.push(event);
+    if (event.type === "sound") {
+      sounds.push(event);
+      if (state) markCandidates(state);
+    }
     if (event.type === "prompt_start") prompts.push({start: event.t, end: null, batch: d.batch});
     if (event.type === "prompt_end") {
       const prompt = prompts.slice().reverse().find(item => item.batch === d.batch && item.end === null);
@@ -277,6 +299,9 @@
         (event.type === "round_result" ? item.kind === "round" && item.round === d.round : item.question === d.question));
       if (window) { window.end = event.t; window.closed = true; }
     }
+    // Historical candidate references may label trace/log sounds even when
+    // their older state must not replace the current authoritative snapshot.
+    if (event.type === "state") markCandidates(d);
     if (event.type === "state" && event.seq > stateCursor) {
       state = {...state, ...d};
       if (!d.approved) state.approved_by = null;
@@ -381,7 +406,7 @@
     const tooltip = byId("trace-tooltip");
     if (!nearest || nearest.distance > 14) { tooltip.hidden = true; return; }
     const data = nearest.sound.data;
-    tooltip.textContent = `${seconds(nearest.sound.t)} · ${data.gated ? "gated" : data.is_knock ? "knock" : "other sound"}\nScore ${Number(data.score).toFixed(3)}${data.top?.length ? `\n${data.top[0][0]} · ${Number(data.top[0][1]).toFixed(3)}` : ""}`;
+    tooltip.textContent = `${seconds(nearest.sound.t)} · ${data.gated ? "gated" : data.candidate ? "candidate knock" : data.is_knock ? "knock" : "other sound"}\nScore ${Number(data.score).toFixed(3)}${data.top?.length ? `\n${data.top[0][0]} · ${Number(data.top[0][1]).toFixed(3)}` : ""}`;
     tooltip.hidden = false;
     tooltip.style.left = `${Math.max(0, Math.min(px + 8, bounds.width - tooltip.offsetWidth))}px`;
     tooltip.style.top = "12px";
@@ -413,6 +438,7 @@
         if (socket) socket.close();
       }
       state = snapshot;
+      markCandidates(state);
       // Backfilled events still draw the trace, but must not replace a newer
       // authoritative snapshot with an earlier status or interview answer.
       stateCursor = Number(snapshot.state_seq || 0);
@@ -476,13 +502,18 @@
         method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, args}),
       });
       if (result.state && typeof result.state === "object") state = {...state, ...result.state};
-      const label = name === "approve" ? "Approval recorded." : `${name.charAt(0).toUpperCase() + name.slice(1)} received.`;
+      const label = name === "approve" ? "Approval recorded." : name === "all_quiet"
+        ? "All quiet recorded. Checking for quiet before the challenge." : `${name.charAt(0).toUpperCase() + name.slice(1)} received.`;
       feedback(label); await refreshState();
     } catch (error) { feedback(error.message, true); }
     finally { busy = false; controls(); }
   }
+  function currentOperator() {
+    return byId("current-operator").value.trim().toUpperCase();
+  }
   for (const button of document.querySelectorAll("[data-command]")) {
-    button.addEventListener("click", () => command(button.dataset.command));
+    button.addEventListener("click", () => command(button.dataset.command,
+      button.dataset.command === "all_quiet" ? {operator: currentOperator() || null, challenge: true} : {}));
   }
   async function roverCommand(name, args = {}) {
     if (!state?.patrol || roverBusy || busy) return;
@@ -527,7 +558,7 @@
     text("approval-description", gap === null ? "Your initials will be recorded with this session."
       : `Your initials will be recorded with the finding at ${gap}.`);
     byId("approval-estop").hidden = !state?.patrol;
-    initials.value = ""; dialog.showModal(); initials.focus();
+    initials.value = currentOperator(); dialog.showModal(); initials.focus();
   }
   byId("approve-button").addEventListener("click", () => openApproval());
   byId("approval-estop").addEventListener("click", () => { dialog.close(); emergencyStop(); });
@@ -536,6 +567,7 @@
     event.preventDefault();
     const operator = initials.value.trim().toUpperCase();
     if (!operator) { initials.focus(); return; }
+    byId("current-operator").value = operator;
     const gap = approvalGap;
     dialog.close();
     if (gap !== null) roverCommand("approve", {gap, operator});
