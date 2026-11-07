@@ -1,0 +1,9 @@
+# Live hardware tests BEFORE the knock head is retrained on real stick recordings.
+# The committed head was trained on synthetic audio and rejected real knocks in a test,
+# so use the rule-based classifier for now. Everything else inherits from rubble.yaml.
+# Usage: uv run hb listen --device stick --profile live
+classifier:
+  # Rule-based knock scoring; switch back to auto after docs/TRAINING.md is done.
+  name: heuristic
+  # Accept a sound as a knock at or above this heuristic score (0-1).
+  threshold: 0.5
