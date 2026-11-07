@@ -1,0 +1,13 @@
+file,source,speed_factor,gain,delay_seconds,added_noise_sd_pcm16,estimated_peak1_s,estimated_peak2_s,estimated_peak3_s
+recording44_aug_01.wav,recording44-16k.wav,0.9,0.45,1.337,0,1.837,2.248,2.648
+recording44_aug_02.wav,recording44-16k.wav,1,0.45,1.057,25,1.507,1.877,2.237
+recording44_aug_03.wav,recording44-16k.wav,1.1,0.45,0.656,60,1.065,1.402,1.729
+recording44_aug_04.wav,recording44-16k.wav,0.9,0.65,1.221,0,1.721,2.132,2.532
+recording44_aug_05.wav,recording44-16k.wav,1,0.65,1.623,25,2.073,2.443,2.803
+recording44_aug_06.wav,recording44-16k.wav,1.1,0.65,0.637,60,1.046,1.382,1.71
+recording44_aug_07.wav,recording44-16k.wav,0.9,0.85,1.519,0,2.019,2.43,2.83
+recording44_aug_08.wav,recording44-16k.wav,1,0.85,0.999,25,1.449,1.819,2.179
+recording44_aug_09.wav,recording44-16k.wav,1.1,0.85,1.05,60,1.459,1.795,2.122
+recording44_aug_10.wav,recording44-16k.wav,0.9,1,1.764,0,2.264,2.675,3.075
+recording44_aug_11.wav,recording44-16k.wav,1,1,0.781,25,1.232,1.601,1.962
+recording44_aug_12.wav,recording44-16k.wav,1.1,1,0.685,60,1.094,1.43,1.758
