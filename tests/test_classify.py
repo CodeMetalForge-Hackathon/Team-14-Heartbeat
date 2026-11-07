@@ -9,7 +9,7 @@ from heartbeat.onset import Onset
 def test_passthrough_preserves_onset_and_gate():
     onset = Onset(t=1.0, peak=0.4, snr_db=23.0, gated=True,
                   clip=np.zeros(15600, dtype=np.float32))
-    detection = make_classifier(load_profile()).classify(onset)
+    detection = make_classifier(ClassifierConfig("none", 0.5)).classify(onset)
     assert detection.t == onset.t
     assert detection.clip is onset.clip
     assert detection.gated is True

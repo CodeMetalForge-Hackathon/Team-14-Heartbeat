@@ -123,10 +123,120 @@ onset:
   # Noise-floor estimate before eligible audio history is available, in dBFS.
   initial_floor_dbfs: -50.0
 classifier:
-  # Classifier registry name; none passes every detected transient through.
-  name: none
-  # Minimum classifier score accepted as a knock.
-  threshold: 0.5
+  # Prefer a trained head, then YAMNet, then the dependency-free heuristic.
+  name: auto
+  # Synthetic-head calibration threshold; remeasure with real contact recordings.
+  threshold: 0.34562463893143186
+  # Display names whose largest YAMNet score is the zero-shot knock score.
+  targets: [Knock, Tap, "Thump, thud"]
+  # Directory containing yamnet.tflite and yamnet_class_map.csv.
+  model_dir: models
+  # Small trained classifier artifact, including its feature spec and threshold.
+  head_path: models/knock_head.joblib
+  # CPU inference threads; benchmark this on the target Raspberry Pi.
+  num_threads: 2
+  features:
+    # RMS envelope smoothing window, in seconds.
+    envelope_s: 0.002
+    # Fraction of peak envelope marking the start of the attack.
+    attack_fraction: 0.1
+    # Envelope drop relative to its peak used to measure decay, in dB.
+    decay_db: -20.0
+    # FFT window length for spectral and log-mel features, in samples.
+    fft_size: 512
+    # Spectral frame hop, in samples.
+    fft_hop: 160
+    # Number of log-mel means in the feature contract.
+    mel_bands: 32
+    # Lowest mel filter edge, in Hz.
+    mel_low_hz: 60.0
+    # Highest mel filter edge, in Hz.
+    mel_high_hz: 7800.0
+    # Boundary between low and middle spectral energy bands, in Hz.
+    low_mid_hz: 250.0
+    # Boundary between middle and high spectral energy bands, in Hz.
+    mid_high_hz: 2000.0
+    # Positive floor for logarithms and numerical divisions.
+    log_floor: 1.0e-12
+  heuristic:
+    # Longest attack receiving knock-like support, in seconds.
+    attack_max_s: 0.03
+    # Longest decay receiving knock-like support, in seconds.
+    decay_max_s: 0.25
+    # Upper spectral centroid reference for knock-like support, in Hz.
+    centroid_max_hz: 2200.0
+    # Lower centroid reference rejecting very low-frequency thumps, in Hz.
+    centroid_min_hz: 150.0
+    # High-band energy ratio beyond which knock support falls to zero.
+    high_ratio_max: 0.3
+    # Peak-to-RMS ratio needed for full impulsiveness support.
+    peak_rms_min: 3.0
+    weights:
+      # Relative contribution of attack time to the heuristic score.
+      attack: 1.0
+      # Relative contribution of decay time to the heuristic score.
+      decay: 1.0
+      # Relative contribution of spectral centroid to the heuristic score.
+      centroid: 2.0
+      # Relative contribution of rejecting low-frequency thumps.
+      centroid_low: 2.0
+      # Relative contribution of high-band energy to the heuristic score.
+      high_ratio: 2.0
+      # Relative contribution of impulsiveness to the heuristic score.
+      peak_rms: 1.0
+  training:
+    # Reproducible seed for source-group splits and logistic regression.
+    random_seed: 42
+    # Requested number of cross-validation folds, grouped by recording.
+    cv_splits: 5
+    # Fraction of source groups reserved only for threshold calibration.
+    calibration_fraction: 0.25
+    # Maximum empirical false-positive rate when choosing a threshold.
+    max_false_positive_rate: 0.02
+    # Inverse regularization strength of the balanced logistic regression.
+    logistic_c: 1.0
+    # Minimum standard-deviation scale for sparse YAMNet probability features.
+    score_scale_floor: 0.01
+    # Maximum optimization iterations for the logistic regression.
+    logistic_max_iter: 1000
+    # Repeated predictions used to measure classifier inference speed.
+    speed_repeats: 20
+    # Full head features; DSP-only mode requires an explicit CLI override.
+    feature_mode: yamnet_dsp
+    synthetic:
+      # Independent source recordings per synthetic sound kind for the dry run.
+      recordings_per_kind: 24
+      # Labeled events per synthetic source recording.
+      events_per_recording: 6
+      # Separation between synthetic events, in seconds.
+      interval_s: 1.2
+      # Lead-in before the first synthetic event, in seconds.
+      first_event_s: 0.75
+      # Audio retained after the last event, in seconds.
+      tail_s: 1.0
+      # Background RMS in synthetic labeled recordings, in dBFS.
+      background_dbfs: -55.0
+      # Quietest background sampled independently for each labeled recording.
+      background_min_dbfs: -60.0
+      # Loudest background sampled independently for each labeled recording.
+      background_max_dbfs: -40.0
+      # Lowest event gain sampled for synthetic recordings, in dB.
+      gain_min_db: -9.0
+      # Highest event gain sampled for synthetic recordings, in dB.
+      gain_max_db: -1.0
+      # Synthetic classes; these are not recordings of real survivors or rubble.
+      kinds: [knock, clap, speech_like, footstep, drop]
+      # Duration of the background-only synthetic challenge evaluation, in seconds.
+      background_duration_s: 600.0
+  evaluation:
+    # Interval between simulated background-only challenges, in stream seconds.
+    challenge_interval_s: 60.0
+    # Number of waveform bins displayed in each review thumbnail.
+    waveform_points: 128
+    # Network timeout used only by the manually approved model fetch command.
+    download_timeout_s: 60.0
+    # Maximum accepted artifact download size, in bytes.
+    download_max_bytes: 67108864
 dialog:
   # Profile name included in dialog snapshots.
   profile: rubble

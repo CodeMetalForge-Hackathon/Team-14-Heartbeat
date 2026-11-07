@@ -17,6 +17,9 @@ dependencies = [
 [project.scripts]
 hb = "heartbeat.cli:main"
 
+[project.optional-dependencies]
+ml = ["ai-edge-litert", "scikit-learn", "joblib"]
+
 [dependency-groups]
 dev = ["pytest"]
 

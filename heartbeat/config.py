@@ -42,6 +42,14 @@ class OnsetConfig:
 class ClassifierConfig:
     name: str
     threshold: float
+    targets: tuple[str, ...] = ("Knock", "Tap", "Thump, thud")
+    model_dir: str = "models"
+    head_path: str = "models/knock_head.joblib"
+    num_threads: int = 2
+    features: dict[str, Any] | None = None
+    heuristic: dict[str, Any] | None = None
+    training: dict[str, Any] | None = None
+    evaluation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

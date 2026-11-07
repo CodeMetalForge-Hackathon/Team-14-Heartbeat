@@ -65,3 +65,6 @@ def make_classifier(cfg: ClassifierConfig | Profile | None = None, *, bus=None) 
     if bus is not None:
         bus.publish("error", 0.0, component="classifier", severity="warning", message=message)
     return PassThroughClassifier(cfg)
+
+
+from . import classifiers as _classifiers  # noqa: E402,F401: populate the registry.
