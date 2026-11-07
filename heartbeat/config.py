@@ -52,6 +52,7 @@ class ClassifierConfig:
     heuristic: dict[str, Any] | None = None
     training: dict[str, Any] | None = None
     evaluation: dict[str, Any] | None = None
+    clap: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,9 @@ def _validate(profile: Profile, synth_template: dict):
     if not isinstance(classifier.name, str) or not classifier.name.strip():
         raise ValueError("classifier.name must be a nonempty string")
     _number("classifier.threshold", classifier.threshold, minimum=0, maximum=1)
+    if classifier.clap is not None or classifier.name == "clap":
+        from .clap_settings import validate_clap
+        validate_clap(classifier.clap)
     _validate_synth(audio.synth, synth_template)
 
 

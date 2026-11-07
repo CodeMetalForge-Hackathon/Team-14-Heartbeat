@@ -60,6 +60,10 @@ def make_classifier(cfg: ClassifierConfig | Profile | None = None, *, bus=None) 
         try:
             return factory(cfg)
         except Exception as exc:
+            if cfg.name == "clap":
+                # A missing inference service must never turn all impacts into
+                # positive knocks through the legacy passthrough fallback.
+                raise RuntimeError(f"CLAP service unavailable: {exc}") from exc
             message = f"Classifier {cfg.name!r} failed to initialize: {exc}; using passthrough ('none')"
     warnings.warn(message, RuntimeWarning, stacklevel=2)
     if bus is not None:
