@@ -229,3 +229,29 @@ before recording the control action; E-STOP stays latched for the patrol.
 
 Motor distance, turn accuracy, settling time, debris coupling, speaker feedback,
 battery voltage, and physical emergency-stop latency still require hardware checks.
+
+## Patrol dashboard
+
+Try the dashboard without hardware, then open the local URL printed by the CLI:
+
+```bash
+uv run hb patrol --dry-run --route profiles/route.yaml --dashboard
+```
+
+The patrol panel keeps one row per gap with its status, odds, interview answers,
+and operator approval. Choose **Approve dig** on a confirmed gap and enter your
+initials; the approval names that gap and survives a page reload within the same
+session. The main dialog controls are disabled while patrol owns the dialog.
+
+The red **E-STOP** sends STOP immediately and latches the patrol against resuming.
+It remains available during another request and inside the approval dialog. A
+lost connection cannot guarantee delivery; use the rover's power switch if STOP
+cannot be acknowledged. Terminal controls are `p` (pause), `r` (resume), `q`
+(abort), and `e` or Space (E-STOP), followed by Enter; Ctrl-C also stops first.
+
+The additive integration contracts are the `rover`, `patrol`, `gap_result`, and
+`patrol_done` events; `approval.data.gap` for per-gap approval; an optional
+`patrol` snapshot in `/api/state`; and `POST /api/rover` with
+`{"name":"stop","args":{}}` (also `pause`, `resume`, `abort`, and `approve`).
+Approval args are `{"gap":"Gap 2","operator":"AB"}`. The endpoint exposes no
+arbitrary drive operation. Non-patrol sessions retain their existing controls.

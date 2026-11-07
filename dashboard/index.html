@@ -42,6 +42,34 @@
         </div>
       </section>
 
+      <section id="patrol-panel" class="panel patrol-panel" aria-labelledby="patrol-title" hidden>
+        <div class="patrol-heading">
+          <div><span class="eyebrow">ROVER PATROL</span><h2 id="patrol-title">Stop. Settle. Listen.</h2><p id="patrol-progress">Waiting for the route</p></div>
+          <button type="button" id="estop-button" class="estop-button">E-STOP<span>Stop rover immediately</span></button>
+        </div>
+        <dl class="patrol-telemetry" aria-label="Rover state">
+          <div><dt>Patrol</dt><dd id="patrol-state" aria-live="polite">—</dd></div>
+          <div><dt>Current gap</dt><dd id="patrol-gap">—</dd></div>
+          <div><dt>Motors</dt><dd id="patrol-motors">—</dd></div>
+          <div><dt>Battery</dt><dd id="patrol-battery">—</dd></div>
+        </dl>
+        <p id="patrol-arrival-warning" class="patrol-warning" role="status" hidden>Arrival unverified: travel was interrupted. This finding belongs to the stopped position.</p>
+        <div class="table-wrap">
+          <table class="patrol-table">
+            <thead><tr><th scope="col">Gap</th><th scope="col">Status</th><th scope="col">Chance random</th><th scope="col">Answers</th><th scope="col">Operator approval</th></tr></thead>
+            <tbody id="patrol-body"><tr class="empty-row"><td colspan="5">The route will appear when patrol starts.</td></tr></tbody>
+          </table>
+        </div>
+        <div class="patrol-footer">
+          <div class="patrol-buttons" aria-label="Patrol controls">
+            <button type="button" data-patrol-command="pause" disabled>Pause</button>
+            <button type="button" data-patrol-command="resume" disabled>Resume</button>
+            <button type="button" data-patrol-command="abort" class="quiet-button" disabled>Abort patrol</button>
+          </div>
+          <p id="patrol-feedback" class="command-feedback" role="status" aria-live="polite">The rover stops before listening at each gap.</p>
+        </div>
+      </section>
+
       <section class="trace-panel panel" aria-labelledby="trace-title">
         <div class="panel-heading">
           <div><h2 id="trace-title">Listen. Ask. Answer.</h2><p id="trace-subtitle">Live audio · last 20 seconds</p></div>
@@ -106,7 +134,8 @@
     <form id="approval-form">
       <span class="eyebrow">OPERATOR APPROVAL</span>
       <h2 id="approval-title">Approve this finding</h2>
-      <p>Your initials will be recorded with this session.</p>
+      <p id="approval-description">Your initials will be recorded with this session.</p>
+      <button type="button" id="approval-estop" class="estop-button dialog-estop" hidden>E-STOP<span>Stop rover immediately</span></button>
       <label for="operator-initials">Operator initials</label>
       <input id="operator-initials" name="operator" autocomplete="off" required placeholder="XX">
       <div class="dialog-buttons"><button type="button" id="cancel-approval" class="quiet-button">Cancel</button><button type="submit" class="approve-button">Approve dig</button></div>
