@@ -355,3 +355,170 @@ def test_cli_ctrl_c_estops_before_close(monkeypatch):
     monkeypatch.setattr(rover, "RoverLink", lambda *a, **kw: link)
     assert main(["rover", "--port", "fake", "drive", "20"]) == 130
     assert link.calls == [("estop",), ("close",)]
+
+
+class ApiPatrol:
+    """Patrol boundary fake; enforce the same thread ownership as production."""
+
+    def __init__(self, pipeline, bus):
+        self.pipeline, self.bus = pipeline, bus
+        self.commands, self.applied, self.approvals = [], [], []
+        self.snapshots = 0
+        self.value = {
+            "state": "MOVING", "gap": "Gap 1", "moving": True, "done": False,
+            "results": [{"gap": "Gap 1", "status": "NO_SIGNS"},
+                        {"gap": "Gap 2", "status": "CONFIRMED", "odds": "1 in 10000", "answers": {}}],
+        }
+
+    def snapshot(self):
+        from copy import deepcopy
+        assert threading.current_thread() is self.pipeline.thread
+        self.snapshots += 1
+        return deepcopy(self.value)
+
+    def command(self, name):
+        assert threading.current_thread() is not self.pipeline.thread
+        # Represents the direct STOP before processing-thread bookkeeping.
+        self.commands.append((name, threading.get_ident()))
+        self.pipeline.call_soon(lambda: self.applied.append(name))
+        return {"ok": True}
+
+    def approve(self, gap, operator):
+        assert threading.current_thread() is self.pipeline.thread
+        result = next((item for item in self.value["results"] if item["gap"] == gap), None)
+        if result is None or result["status"] != "CONFIRMED":
+            return {"ok": False, "error": "approval requires a CONFIRMED gap"}
+        result.update(approved=True, approved_by=operator)
+        self.approvals.append((gap, operator))
+        self.bus.publish("approval", self.pipeline.t, gap=gap, operator=operator, approved=True)
+        value = self.snapshot()
+        self.bus.publish("patrol", self.pipeline.t, **value)
+        return {"ok": True, "patrol": value}
+
+
+@pytest.fixture
+def patrol_api(tmp_path):
+    from fastapi.testclient import TestClient
+    from heartbeat.server import create_app
+    from test_server import FakePipeline, FakeSession
+    pipeline, bus = FakePipeline(), EventBus()
+    session = FakeSession(pipeline, bus)
+    patrol = ApiPatrol(pipeline, bus)
+    app = create_app(pipeline, session, bus, patrol=patrol,
+                     cfg={"request_timeout_s": 0.1}, dashboard_dir=tmp_path,
+                     on_start=pipeline.start, on_stop=pipeline.close)
+    with TestClient(app) as client:
+        yield client, pipeline, session, patrol, bus
+
+
+@pytest.mark.parametrize("name,expected", [("stop", "estop"), ("estop", "estop"),
+                                         ("pause", "pause"), ("resume", "resume"), ("abort", "abort")])
+def test_rover_api_controls_run_before_pipeline_callbacks(patrol_api, name, expected):
+    client, pipeline, session, patrol, _ = patrol_api
+    pipeline.gate.clear()
+    try:
+        response = client.post("/api/rover", json={"name": name})
+        assert response.status_code == 200
+        assert [item[0] for item in patrol.commands] == [expected]
+        assert patrol.commands[0][1] != pipeline.thread.ident
+        assert not patrol.applied and not session.commands
+    finally:
+        pipeline.gate.set()
+    pipeline.submit(lambda: None)
+    assert patrol.applied == [expected]
+
+
+def test_rover_api_estop_still_runs_after_pipeline_has_finished(patrol_api):
+    client, pipeline, _, patrol, _ = patrol_api
+    pipeline.finish()
+    assert client.post("/api/rover", json={"name": "stop"}).status_code == 200
+    assert [item[0] for item in patrol.commands] == ["estop"]
+    assert not patrol.applied
+
+
+@pytest.mark.parametrize("body", [[], {}, {"name": True}, {"name": "drive", "args": {"cm": 1}},
+    {"name": "turn"}, {"name": "STOP"}, {"name": "stop", "extra": 1},
+    {"name": "stop", "args": []}, {"name": "stop", "args": {"operator": "AB"}},
+    {"name": "approve"}, {"name": "approve", "args": {"gap": "Gap 2"}},
+    {"name": "approve", "args": {"gap": "Gap 2", "operator": " "}},
+    {"name": "approve", "args": {"gap": True, "operator": "AB"}},
+    {"name": "approve", "args": {"gap": "Gap 2", "operator": "AB", "t": 0}},
+])
+def test_rover_api_rejects_invalid_names_and_args_without_dispatch(patrol_api, body):
+    client, _, session, patrol, _ = patrol_api
+    assert client.post("/api/rover", json=body).status_code == 400
+    assert not patrol.commands and not patrol.approvals and not session.commands
+
+
+@pytest.mark.parametrize("name", ["challenge", "reset", "approve", "cancel", "unknown"])
+def test_patrol_rejects_all_generic_dialog_commands(patrol_api, name):
+    client, _, session, patrol, _ = patrol_api
+    assert client.post("/api/command", json={"name": name}).status_code == 400
+    assert not session.commands and not patrol.commands
+
+
+def test_rover_api_gap_approval_is_recorded_and_reconnect_state_is_scoped(patrol_api):
+    client, pipeline, session, patrol, _ = patrol_api
+    pipeline.submit(lambda: patrol.value.update(state="DONE", moving=False, done=True))
+    response = client.post("/api/rover", json={"name": "approve", "args": {"gap": "Gap 2", "operator": " AB "}})
+    assert response.status_code == 200 and response.json()["ok"]
+    assert patrol.approvals == [("Gap 2", "AB")]
+    events = client.get("/api/events").json()["events"]
+    approval = next(item for item in events if item["type"] == "approval")
+    assert approval["data"] == {"gap": "Gap 2", "operator": "AB", "approved": True}
+    with client.websocket_connect(f"/ws?since={approval['seq'] - 1}") as websocket:
+        assert websocket.receive_json()["data"] == approval["data"]
+    state = client.get("/api/state").json()
+    assert state["patrol"]["done"]
+    assert state["patrol"]["results"][1]["approved_by"] == "AB"
+    assert not state["approved"] and state["approved_by"] is None
+    assert not session.commands
+
+
+@pytest.mark.parametrize("gap", ["Gap 1", "missing gap"])
+def test_rover_api_approval_requires_confirmed_existing_gap(patrol_api, gap):
+    client, _, _, patrol, _ = patrol_api
+    response = client.post("/api/rover", json={"name": "approve", "args": {"gap": gap, "operator": "AB"}})
+    assert response.status_code == 400 and "CONFIRMED" in response.json()["detail"]
+    assert not patrol.approvals
+
+
+def test_rover_api_finished_pipeline_uses_cache_and_refuses_unrecordable_approval(patrol_api):
+    client, pipeline, _, patrol, _ = patrol_api
+    assert client.get("/api/state").json()["patrol"]["gap"] == "Gap 1"
+    pipeline.submit(lambda: patrol.value.update(state="DONE", moving=False, done=True))
+    pipeline.finish()
+    before = patrol.snapshots
+    state = client.get("/api/state").json()
+    assert state["patrol"]["done"] and not state["pipeline_running"]
+    assert patrol.snapshots == before
+    response = client.post("/api/rover", json={"name": "approve", "args": {"gap": "Gap 2", "operator": "AB"}})
+    assert response.status_code == 400 and "finished" in response.json()["detail"]
+    assert not patrol.approvals
+
+
+def test_rover_api_timed_out_approval_is_cancelled_before_execution(patrol_api):
+    client, pipeline, _, patrol, _ = patrol_api
+    pipeline.gate.clear()
+    try:
+        response = client.post("/api/rover", json={"name": "approve", "args": {"gap": "Gap 2", "operator": "AB"}})
+        assert response.status_code == 504
+    finally:
+        pipeline.gate.set()
+    pipeline.submit(lambda: None)
+    assert not patrol.approvals
+
+
+def test_rover_api_rejects_non_json_body(patrol_api):
+    client, _, _, patrol, _ = patrol_api
+    assert client.post("/api/rover", content="{", headers={"content-type": "application/json"}).status_code == 400
+    assert not patrol.commands
+
+
+def test_rover_api_requires_patrol_session(tmp_path):
+    from fastapi.testclient import TestClient
+    from test_server import make_test_app
+    app, *_ = make_test_app(tmp_path)
+    with TestClient(app) as client:
+        response = client.post("/api/rover", json={"name": "stop"})
+        assert response.status_code == 400 and "patrol" in response.json()["detail"]

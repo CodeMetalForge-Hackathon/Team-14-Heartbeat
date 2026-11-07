@@ -109,6 +109,19 @@ def _parser() -> argparse.ArgumentParser:
     led = rover_commands.add_parser("led")
     for color in ("r", "g", "b"):
         led.add_argument(color, type=int)
+    patrol = commands.add_parser("patrol", help="stop, settle, and listen at each route gap")
+    patrol.add_argument("--rover", help="Ranger USB serial port; unnecessary for --dry-run")
+    patrol.add_argument("--device", type=_device, default="stick")
+    patrol.add_argument("--knocker", default="auto")
+    patrol.add_argument("--speaker-device", type=_device)
+    patrol.add_argument("--route", type=Path, default=Path("profiles/route.yaml"))
+    patrol.add_argument("--profile", default="rubble")
+    patrol.add_argument("--dry-run", action="store_true", help="fake rover and simulated survivor; no hardware")
+    patrol.add_argument("--dashboard", action="store_true")
+    patrol.add_argument("--host")
+    patrol.add_argument("--port", type=int)
+    patrol.add_argument("--run-dir", type=Path)
+    patrol.add_argument("--seed", type=int, default=1)
     doctor = commands.add_parser("doctor", help="check sentinel hardware and deployment readiness")
     doctor.add_argument("--device", type=_device, default="stick", help="stick, stick:<port>, or audio device")
     doctor.add_argument("--speaker-device", type=_device)
@@ -380,16 +393,23 @@ def _run_directory(args, profile) -> Path:
 def _serve(runtime, args, profile) -> None:
     from .server import create_app, run_server
 
+    def close_runtime():
+        patrol = getattr(runtime, "patrol", None)
+        if patrol is not None and not patrol.done:
+            patrol.command("estop")
+        runtime.close()
+
     try:
         app = create_app(
             runtime.pipeline, runtime.session, runtime.bus, cfg=profile.server,
             run_id=runtime.run_dir.name, profile=profile,
             blackbox=runtime.blackbox, on_start=runtime.start,
-            on_stop=lambda: asyncio.to_thread(runtime.close),
+            on_stop=lambda: asyncio.to_thread(close_runtime),
+            patrol=getattr(runtime, "patrol", None),
         )
         run_server(app, host=args.host, port=args.port)
     finally:
-        runtime.close()
+        close_runtime()
 
 
 def _run(args, profile, bus) -> int:
@@ -520,6 +540,99 @@ def _rover(args, profile, bus) -> int:
         link.close()
 
 
+def _patrol_input(patrol) -> None:
+    commands = {"p": "pause", "r": "resume", "q": "abort", "e": "estop", " ": "estop"}
+    try:
+        while not patrol.done:
+            line = sys.stdin.readline()
+            if not line:
+                return
+            key = line.rstrip("\r\n").lower()
+            if key in commands:
+                result = patrol.command(commands[key])
+                if not result.get("ok"):
+                    print(result.get("error", "Rover command failed"), file=sys.stderr)
+    except (OSError, ValueError):
+        return
+
+
+def _patrol(args, profile, bus) -> int:
+    from .patrol import Patrol, load_route, prepare_patrol_simulation
+    from .prompter import make_prompter
+    from .rover import RoverLink
+
+    route = load_route(args.route)
+    if not args.dry_run and not args.rover:
+        raise ValueError("--rover is required unless --dry-run is selected")
+    profile = replace(profile, dialog=dict(profile.dialog, auto_challenge=False),
+                      rover=dict(profile.rover, stop_on_done=not args.dashboard))
+    bus.subscribe(_DialogConsole())
+    errors = []
+    bus.subscribe(lambda event: errors.append(event) if event.type == "error"
+                  and event.data.get("severity") != "warning" else None)
+    runtime = controller = rover = None
+    try:
+        directory = _run_directory(args, profile)
+        if args.dry_run:
+            runtime, controller = prepare_patrol_simulation(
+                profile, route, bus=bus, run_dir=directory, argv=args._argv,
+                seed=args.seed, realtime=args.dashboard)
+        else:
+            excluded = {args.knocker} if args.knocker not in {"auto", "manual", "speaker"} else set()
+            if isinstance(args.device, str) and args.device.startswith("stick:"):
+                excluded.add(args.device[len("stick:"):].strip())
+            rover = RoverLink(args.rover, cfg=profile.rover, bus=bus, exclude_ports=excluded)
+
+            def source_factory():
+                # Reserve and stop the rover before any microphone/knocker scan.
+                if not rover.stop():
+                    raise RuntimeError("Could not establish a stopped rover")
+                return open_input(args.device, profile.audio, bus)
+
+            def prompter_factory(pipeline):
+                rover.clock = lambda: pipeline.t
+                ports = {rover.port}
+                if isinstance(pipeline.source, StickMicSource):
+                    ports.add(pipeline.source.port)
+                return make_prompter(args.knocker, bus, cfg=profile.prompter,
+                                     clock=lambda: pipeline.t, speaker_device=args.speaker_device,
+                                     exclude_ports=ports)
+
+            runtime = prepare_runtime(profile, source_factory, prompter_factory, bus=bus,
+                                      run_dir=directory, argv=args._argv, rng_seed=args.seed)
+            controller = Patrol(rover, runtime.pipeline, runtime.session, runtime.session.prompter,
+                                route, profile.rover)
+            runtime.on_close.extend([controller.close, rover.close])
+            if isinstance(runtime.pipeline.source, StickMicSource):
+                sink = StickStatusSink(runtime.pipeline.source)
+                unsubscribe = bus.subscribe(sink)
+                runtime.on_close.extend([unsubscribe, sink.close])
+            controller.start()
+        runtime.patrol = controller
+        print("Keys then Enter: p pause, r resume, q abort, e or Space E-STOP. Ctrl-C also stops.")
+        threading.Thread(target=_patrol_input, args=(controller,), daemon=True,
+                         name="heartbeat-patrol-stdin").start()
+        if args.dashboard:
+            _serve(runtime, args, profile)
+        else:
+            runtime.start()
+            runtime.pipeline.join()
+    finally:
+        # STOP precedes source/prompt/recording shutdown, including Ctrl-C.
+        if controller is not None and not controller.done:
+            controller.command("estop")
+        if runtime is not None:
+            runtime.close()
+        if rover is not None:
+            rover.close()
+    print("Gap | Status | Odds | Answers")
+    for result in controller.results:
+        position = " (position unverified)" if result.get("arrival_unverified") else ""
+        print(f"{result['gap']}{position} | {result['status']} | {result['odds']} | "
+              f"{json.dumps(result['answers'], sort_keys=True)}")
+    return 0 if controller.state == "DONE" and not errors else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     args._argv = list(sys.argv if argv is None else ["hb", *argv])
@@ -548,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
         profile = load_profile(args.profile)
         if args.command == "rover":
             return _rover(args, profile, bus)
+        if args.command == "patrol":
+            return _patrol(args, profile, bus)
         if args.command == "doctor":
             from .doctor import format_doctor, run_doctor
 

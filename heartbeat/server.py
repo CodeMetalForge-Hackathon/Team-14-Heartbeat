@@ -106,6 +106,8 @@ class _StateCache:
         self._order = -1
         self._approval_order = -1
         self._approved_by = None
+        self._patrol_snapshot = {}
+        self._patrol_order = -1
 
     def update(self, snapshot, order):
         with self._lock:
@@ -125,6 +127,16 @@ class _StateCache:
     def get(self):
         with self._lock:
             return deepcopy(self._snapshot), self._approved_by, self._order
+
+    def update_patrol(self, snapshot, order):
+        with self._lock:
+            if order >= self._patrol_order:
+                self._patrol_snapshot = deepcopy(snapshot)
+                self._patrol_order = order
+
+    def get_patrol(self):
+        with self._lock:
+            return deepcopy(self._patrol_snapshot)
 
 
 @dataclass(eq=False)
@@ -201,8 +213,10 @@ class EventBridge:
             self.latest_seq = number
             if event.type == "state":
                 self.cache.update(payload["data"], number)
-            elif event.type == "approval":
+            elif event.type == "approval" and "gap" not in payload["data"]:
                 self.cache.approval(payload["data"].get("operator"), number)
+            elif event.type == "patrol":
+                self.cache.update_patrol(payload["data"], number)
             for client in tuple(self._clients):
                 if number <= client.after:
                     continue
@@ -266,7 +280,7 @@ async def _hook(callback):
 
 
 def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
-               blackbox=None, dashboard_dir=None, on_start=None, on_stop=None):
+               blackbox=None, dashboard_dir=None, on_start=None, on_stop=None, patrol=None):
     """Create an ASGI app; lifecycle hooks keep uvicorn on the main thread.
 
     ``session.command_result`` and ``session.engine.snapshot`` are invoked only
@@ -292,8 +306,12 @@ def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
         if session.engine is None:
             raise RuntimeError("Dialog engine has not started")
         value = session.engine.snapshot()
+        if patrol is not None:
+            value = {**value, "patrol": patrol.snapshot()}
         order = bridge.published_seq
         cache.update(value, order)
+        if patrol is not None:
+            cache.update_patrol(value["patrol"], order)
         return value, order
 
     def final_snapshot(t):
@@ -341,6 +359,8 @@ def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
 
     def decorate(value, state_seq):
         _, approved_by, _ = cache.get()
+        if patrol is not None:
+            value = {**value, "patrol": cache.get_patrol()}
         return {
             **to_jsonable(value), "run_id": str(run_id), "profile": profile,
             "sentinel_name": cfg.sentinel_name, "uptime": float(pipeline.t),
@@ -379,6 +399,8 @@ def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
 
     @app.post("/api/command")
     async def command(request: Request):
+        if patrol is not None:
+            raise HTTPException(400, "Patrol sessions accept only gap-aware controls through /api/rover")
         try:
             body = await request.json()
         except ValueError as exc:
@@ -410,6 +432,58 @@ def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
             raise HTTPException(503, f"Command dispatch failed: {exc}") from exc
         if not result.get("ok"):
             return JSONResponse({**result, "detail": result.get("error", "Invalid command")}, status_code=400)
+        return result
+
+    @app.post("/api/rover")
+    async def rover_command(request: Request):
+        if patrol is None:
+            raise HTTPException(400, "Rover controls require a patrol session")
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "Rover command body must be JSON") from exc
+        if not isinstance(body, dict) or set(body) - {"name", "args"}:
+            raise HTTPException(400, "Rover command must contain name and optional args")
+        name, args = body.get("name"), body.get("args", {})
+        if not isinstance(name, str) or name not in {"stop", "estop", "pause", "resume", "abort", "approve"}:
+            raise HTTPException(400, "Unknown rover command")
+        if not isinstance(args, dict):
+            raise HTTPException(400, "Rover command args must be an object")
+        if name == "approve":
+            if set(args) != {"gap", "operator"} or any(
+                not isinstance(args[key], str) or not args[key].strip() for key in ("gap", "operator")
+            ):
+                raise HTTPException(400, "Approval requires a gap name and operator")
+            if pipeline.finished:
+                raise HTTPException(400, "Audio session has finished; approval requires a running recording")
+
+            def approve():
+                if pipeline.finished:
+                    return {"ok": False, "error": "Audio session has finished; approval requires a running recording"}
+                result = patrol.approve(args["gap"].strip(), args["operator"].strip())
+                if result.get("ok"):
+                    patrol_state = result["patrol"] if "patrol" in result else patrol.snapshot()
+                    cache.update_patrol(patrol_state, bridge.published_seq)
+                return result
+
+            operation = processing_call(approve)
+        else:
+            if args:
+                raise HTTPException(400, "Rover control commands do not accept args")
+            # STOP runs on its own worker, independently of a busy or finished
+            # processing queue. Patrol sends the motor STOP before queuing its
+            # bookkeeping callback; never route this through processing_call.
+            operation = asyncio.to_thread(patrol.command, "estop" if name == "stop" else name)
+        try:
+            result = to_jsonable(await asyncio.wait_for(operation, cfg.request_timeout_s))
+        except asyncio.TimeoutError as exc:
+            if name == "approve" and pipeline.finished:
+                raise HTTPException(400, "Audio session has finished; approval requires a running recording") from exc
+            raise HTTPException(504, "Rover control timed out; check state before retrying") from exc
+        except Exception as exc:
+            raise HTTPException(503, f"Rover control failed: {exc}") from exc
+        if not result.get("ok"):
+            return JSONResponse({**result, "detail": result.get("error", "Rover control refused")}, status_code=400)
         return result
 
     @app.websocket("/ws")

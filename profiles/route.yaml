@@ -1,0 +1,12 @@
+# Ordered gaps; each movement is relative to the previous stopped position.
+- name: Gap 1
+  moves:
+    - [drive, 40]  # Travel in centimeters to the first listening point.
+- name: Gap 2
+  moves:
+    - [turn, 90]  # Turn in degrees toward the second gap.
+    - [drive, 30]  # Travel in centimeters to the simulated survivor.
+- name: Gap 3
+  moves:
+    - [turn, -90]  # Turn back toward the next listening point.
+    - [drive, 30]  # Travel in centimeters to the third gap.

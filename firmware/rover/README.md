@@ -192,3 +192,40 @@ USB port. Open mBlock, select/connect the **mBot Ranger / Me Auriga**, and use i
 completion instructions before disconnecting it. This replaces Heartbeat's
 sketch. EEPROM calibration may survive reflashing; a later Heartbeat `CAL` can
 overwrite it. Restoring stock firmware has not been tested on this rover.
+
+## Stop–listen–move patrol
+
+First exercise the complete route without any connected hardware:
+
+```bash
+uv run hb patrol --dry-run --route profiles/route.yaml
+uv run pytest -q tests/test_rover.py tests/test_patrol.py
+```
+
+The synthetic survivor answers at Gap 2 only. The expected result table is
+`NO_SIGNS`, `CONFIRMED`, `NO_SIGNS`, with the knock interview answers recorded
+for Gap 2. `NO_SIGNS` means no positive response was collected at that stop.
+
+After flashing, checking motor direction with the tracks raised, and calibrating
+on the real surface, a human can start a connected patrol:
+
+```bash
+uv run hb patrol --rover /dev/ROVER --device stick --knocker /dev/KNOCKER --route profiles/route.yaml --dashboard
+```
+
+Each route leg runs with detection gated. The host waits for STOP, leaves the
+motors off for the configured settling interval, then opens detection and runs
+the deterministic dialog. It waits for the complete interview after confirmation.
+Background noise history survives every gap reset. A timed-out prompt finishes
+before the next movement begins. Movement never runs during an active prompt,
+response window, pre-listen check, or interview.
+
+Pause sends STOP immediately. Resume settles and listens at the actual stopped
+position; it does not repeat an unknown portion of an interrupted drive or turn.
+An interrupted leg marks `interrupted_move` and latches `arrival_unverified` for
+that result and later relative route positions. Re-establish the rover's position
+and start a new patrol if an exact arrival is needed. Abort and E-STOP send STOP
+before recording the control action; E-STOP stays latched for the patrol.
+
+Motor distance, turn accuracy, settling time, debris coupling, speaker feedback,
+battery voltage, and physical emergency-stop latency still require hardware checks.
