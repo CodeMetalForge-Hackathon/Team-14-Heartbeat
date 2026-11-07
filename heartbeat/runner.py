@@ -137,6 +137,7 @@ class Pipeline:
             is_knock=bool(det.is_knock),
             classifier=str(det.classifier),
             top=det.top,
+            evidence=getattr(det, "evidence", None),
             clip=None,
             _clip=det.clip,
         )
@@ -520,6 +521,7 @@ class SessionRuntime:
         self.blackbox = blackbox
         self.run_dir = None if run_dir is None else Path(run_dir)
         self._unsubscribe = unsubscribe
+        self.on_close: list[Callable[[], Any]] = []
         self._started = False
         self._closed = threading.Event()
         self._cleanup_lock = threading.Lock()
@@ -546,6 +548,12 @@ class SessionRuntime:
                 self.session.close()
             finally:
                 try:
+                    for callback in self.on_close:
+                        try:
+                            callback()
+                        except Exception as exc:
+                            self.bus.publish("error", self.pipeline.t,
+                                             where="session.close", message=str(exc))
                     if self.blackbox is not None:
                         self.blackbox.close()
                 finally:

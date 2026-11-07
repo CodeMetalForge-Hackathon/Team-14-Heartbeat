@@ -9,15 +9,17 @@ Run two Codex sessions in parallel. They never edit the same files.
 |---|---|
 | **P01** scaffold, audio, onset detector, recorder | **P02** servo knocker firmware (start now) |
 | **P03** dialog engine, stats, prompters, `hb sim` (needs P01) | **P05** classifier and data tools (needs P01, plus some recorded data) |
-| **P04** black box and dashboard (needs P03) | |
+| **P04** black box and dashboard (needs P03) | **P07** M5StickC Plus SE as the microphone (needs P05) |
 | **P06** Pi deploy, doctor, bench (needs P04) | |
 
+**Lane C** (third session, in parallel): **FIX-01**, dialog noise guards and fast-knock features, from the P03/P05 review.
+
 Later prompts get written after we see these results:
-- P07: rover bridge for the mBot Ranger (stop → listen → move)
-- P08: LoRa link
-- P09: mmWave breathing
-- P10: SLM field brain and orchestrator
-- P11: avalanche, mine and hull profiles
+- P08: rover bridge for the mBot Ranger (stop → listen → move)
+- P09: LoRa link, or a wireless (Wi-Fi) stick node
+- P10: mmWave breathing
+- P11: SLM field brain and orchestrator
+- P12: avalanche, mine and hull profiles
 
 ## How to run one
 In the repo root, start Codex and say:

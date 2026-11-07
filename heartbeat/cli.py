@@ -122,8 +122,13 @@ class _ListenConsole:
             label = "GATED" if data["gated"] else ("KNOCK" if data["is_knock"] else "REJECTED")
             line = (
                 f"{event.t:8.2f}s  {label:8s} snr {data['snr_db']:.1f} dB  "
-                f"peak {data['peak']:.2f}  ({data['classifier']})"
+                f"peak {data['peak']:.2f}  score {data.get('score', 0.0):.2f}  ({data['classifier']})"
             )
+            evidence = data.get("evidence")
+            if evidence:
+                weakest = min(evidence, key=evidence.get)
+                parts = "  ".join(f"{k}={v:.2f}" for k, v in evidence.items())
+                line += f"\n          rules: {parts}  <- weakest: {weakest}"
             if (data["gated"] or not data["is_knock"]) and sys.stdout.isatty():
                 line = f"\033[2m{line}\033[0m"
             print(line, flush=True)
@@ -349,7 +354,6 @@ def _run_directory(args, profile) -> Path:
     return path
 
 
-
 def _serve(runtime, args, profile) -> None:
     from .server import create_app, run_server
 
@@ -363,7 +367,6 @@ def _serve(runtime, args, profile) -> None:
         run_server(app, host=args.host, port=args.port)
     finally:
         runtime.close()
-
 
 
 def _run(args, profile, bus) -> int:
