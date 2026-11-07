@@ -105,3 +105,13 @@ segment → train_head → reports/classifier.md
 If `data/raw/` is empty, use synthetic data and say so clearly.
 
 Commit `P05: knock classifier + data tools`. Paste the comparison table into your report.
+
+## Notes from the P01 review (read before starting)
+- **`ClassifierConfig` is a frozen dataclass with only `name` and `threshold`.** `config.py` rejects any unknown key. You may edit `config.py`, but **only** to add `ClassifierConfig` fields, each with a default, for example:
+  - `targets: list[str]`
+  - `model_dir: str`
+  - `head_path: str`
+
+  Then add the matching keys to `profiles/rubble.yaml`. Keep the other sections untouched.
+- **API.** `Detection` subclasses `Onset`. Register each factory with `classify.register(name, factory)`; the factory receives a `ClassifierConfig`.
+- **Profile switch.** When you finish, set `classifier.name: auto` in `profiles/rubble.yaml`. P03 relies on it.

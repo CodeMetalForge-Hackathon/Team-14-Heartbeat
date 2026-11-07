@@ -157,3 +157,10 @@ Tests pass, and these work:
 - `uv run hb sim --no-survivor --noise` ends without a confirmation.
 
 Commit `P03: dialog engine, stats, prompters, hb run/sim`. Report, and include one sample transcript.
+
+## Notes from the P01 review (read before starting)
+- **Messages into the processing thread.** `Pipeline` has no inbound message queue yet. Add `Pipeline.call_soon(fn)`: a thread-safe queue that is drained on the processing thread at the start of every block. Use it for `engine.on_prompts_finished(t_end)` and for operator commands. P04's server will use it too.
+- **Gates.** `OnsetDetector.gate(t_start, t_end)` closes an open gate when you **repeat the same `t_start`**. It is not thread-safe, so call it only through `call_soon`, never from the prompt worker thread.
+- **The prompt worker's clock.** For the current stream time, the worker reads `pipeline.t`.
+- **Dialog config.** The `dialog` and `prompter` profile sections reach you as plain dicts. Parse them into dataclasses inside `dialog.py` and `prompter.py`, and reject unknown keys there. Don't edit `config.py`.
+- **Classifier for now.** The profile uses `classifier.name: none`, which counts every sound as a knock until P05 lands. `hb run` should print a warning while that's true.

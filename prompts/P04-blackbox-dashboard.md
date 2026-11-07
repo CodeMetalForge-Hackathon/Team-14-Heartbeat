@@ -87,3 +87,8 @@ Two pieces:
 - `uv run hb verify runs/<latest>` prints OK.
 
 Commit `P04: black box + dashboard`. Report, and say what a human should look at in the browser.
+
+## Notes from the P01 review (read before starting)
+- **`EventBus.publish` calls subscribers synchronously, on the publishing thread, under a lock.** A slow subscriber stalls the audio pipeline. The `BlackBox` subscriber must only enqueue: one writer thread does all file I/O, covering both the JSONL and the clip WAVs. The WebSocket bridge must only enqueue as well.
+- **Clips.** The clip array is on `event.clip`, taken from `_clip`. `event.data["clip"]` is `None` until you fill in the path.
+- **Operator commands** go to the engine through `Pipeline.call_soon` (added in P03).
