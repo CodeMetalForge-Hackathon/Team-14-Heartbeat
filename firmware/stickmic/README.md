@@ -1,10 +1,12 @@
 # Heartbeat stick microphone
 
-For **M5StickC Plus SE, ESP32-PICO-D4, 135×240 LCD, SPM1423 PDM microphone, no IMU**. It sends 16 kHz mono signed 16-bit PCM over the USB-to-serial bridge at 921600 baud. This is a serial source, not a USB audio device. The built-in speaker and IMU initialization are disabled.
+For **M5StickC Plus SE, ESP32-PICO-D4, 135×240 LCD, SPM1423 PDM microphone, no IMU**. It sends 16 kHz mono signed 16-bit PCM over the USB-to-serial bridge at **500000 baud**. This is a serial source, not a USB audio device. The built-in speaker and IMU initialization are disabled.
+
+The SE's CH552 bridge supports 500000 but not the original 921600 setting; unsupported rates can produce zeros or garbled UART data. Host `audio.stick_baud` and firmware `SERIAL_BAUD` must both be 500000. Reflash older 921600 firmware before using the updated host. See [M5Stack's supported baud rates](https://docs.m5stack.com/en/core/StickC-Plus_SE).
 
 ## Install, compile, upload
 
-These commands are for a human to run from the repository root. Toolchain installation, upload, port access, and physical microphone tests were not run by the coding agent.
+Run these commands from the repository root. FIX-02 includes an explicitly authorized real-stick diagnostic; its build, upload, and hardware results are recorded in [reports/FIX-02.md](../../reports/FIX-02.md).
 
 The ESP32 board-manager URL is <https://espressif.github.io/arduino-esp32/package_esp32_index.json>. The usual latest-version commands are `arduino-cli core install esp32:esp32` and `arduino-cli lib install M5Unified`; for this sketch use the following reproducible **core 3.x / M5Unified 0.3.0 / M5GFX 0.3.0** combination. Version 0.3.0 supplies the microphone buffer-release callback and continuous-buffer handling used here; older M5Unified releases are unsupported.
 
@@ -21,13 +23,13 @@ arduino-cli compile --fqbn esp32:esp32:m5stack_stickc_plus:DebugLevel=none firmw
 # Replace this with the stick's USB serial port, never the knocker's port.
 STICK_PORT=/dev/cu.usbserial-REPLACE_ME
 # On Raspberry Pi this will commonly be /dev/ttyUSB0.
-arduino-cli upload --fqbn esp32:esp32:m5stack_stickc_plus:DebugLevel=none --port "$STICK_PORT" firmware/stickmic
-arduino-cli monitor --port "$STICK_PORT" --config baudrate=921600
+arduino-cli upload --fqbn esp32:esp32:m5stack_stickc_plus:DebugLevel=none --upload-property upload.speed=115200 --port "$STICK_PORT" firmware/stickmic
+arduino-cli monitor --port "$STICK_PORT" --config baudrate=500000
 ```
 
-The board candidate `esp32:esp32:m5stack_stickc_plus` is confirmed in [Espressif's board definitions](https://github.com/espressif/arduino-esp32/blob/3.3.12/boards.txt). Confirm it with `board listall` after installation. The local inventory contained only Arduino AVR 1.8.8 and Servo, so a real ESP32 compile was **not available**. No toolchains were installed. The sketch fixes the display/board selection to StickC Plus and sets `internal_imu=false`, avoiding a dependency on an IMU being present on the SE.
+The board candidate `esp32:esp32:m5stack_stickc_plus` is confirmed in [Espressif's board definitions](https://github.com/espressif/arduino-esp32/blob/3.3.12/boards.txt). Confirm it with `board listall` after installation. The sketch fixes the display/board selection to StickC Plus and sets `internal_imu=false`, avoiding a dependency on an IMU being present on the SE.
 
-Close the serial monitor before using `hb`; exactly one process should own the port. Upload/reset may print ESP32 boot text at a different baud before the firmware's `READY` line. The host opens with DTR/RTS low to avoid resetting the stick.
+Close the serial monitor before using `hb`; exactly one process should own the port. Use 115200 for the bootloader upload; its switch to 500000 failed on the tested SE. This upload rate is separate from the firmware's 500000-baud audio connection. The host configures DTR/RTS low before opening, but the tested macOS bridge still restarted the stick on open. ROM boot text at 115200 therefore appears garbled at 500000 and can run directly into `READY`. The host allows up to three seconds for startup and resends newline/STOP/PING after that banner to discard any command received at the old boot baud.
 
 ## Protocol
 
@@ -47,7 +49,9 @@ ASCII uppercase command lines end in LF; CRLF is accepted. Only printable ASCII 
 
 `MAG` changes M5Unified's integer microphone multiplier, not decibels. Use it in text mode, then `START`; high values can clip. Persistence uses the ESP32 core's Preferences/NVS namespace `hb-stickmic`, key `mag`. Invalid values return `ERR mag_range_1_255`; failed persistence returns `ERR mag_save` without changing the multiplier. The LCD footer displays the current value. It survives reboot and normal upload unless flash/NVS is erased.
 
-While streaming, only `STOP` and valid `STATUS` commands take effect. **No textual responses are emitted while streaming**, including for malformed/unknown commands, `PING`, repeated `START`, or `MAG`. A `STOP` is processed between complete frames; queued UART bytes can still arrive afterward. To recover from a previous host crash without resetting the stick, send `STOP\n`, then `PING\n`, drain the remaining binary bytes until `PONG stickmic v1`, and only then send `START\n`.
+The firmware boots **idle**, displays `Awaiting host`, and streams only after `START`. While streaming, only `STOP` and valid `STATUS` commands take effect. **No textual responses are emitted while streaming**, including for malformed/unknown commands, `PING`, repeated `START`, or `MAG`. A `STOP` is processed between complete frames; queued UART bytes can still arrive afterward. To recover from a previous host crash without resetting the stick, send `\nSTOP\n` (the leading newline terminates any partial old command), drain and flush pending input, send `PING\n`, and only send `START\n` after receiving `PONG stickmic v1`. The host performs this handshake without depending on the one-time `READY` line.
+
+Use `uv run hb listen --device stick:/dev/cu.<port> --debug` to print the first 200 raw received bytes, including bytes drained during the handshake. Short or failed sessions print all available bytes up to that limit. Serial timeout is configured before opening and kept fixed while reading, avoiding repeated custom-baud reconfiguration on macOS.
 
 Each frame is exactly 520 bytes:
 
@@ -75,7 +79,7 @@ Find the **microphone pinhole** on your stick; verify it against the device encl
 
 ## Human test checklist
 
-1. Compile and upload with the commands above. At 921600 baud confirm `READY`, `PING` → `PONG stickmic v1`, and `K 1 200` / `CAL 90 120 40` → `ERR command`.
+1. Compile and upload with the commands above. At 500000 baud confirm `READY`, `PING` → `PONG stickmic v1`, and `K 1 200` / `CAL 90 120 40` → `ERR command`.
 2. Send `MAG 16`, confirm `OK MAG 16`, reboot, and check `MAG 16` on the LCD. Check `MAG 0`, `MAG 256`, and nonnumeric values are rejected. Send all three `STATUS` words with short text and check the colors, two-line text, battery voltage, and button-A backlight toggle.
 3. Close the monitor. Run the sequence below; confirm slab knocks appear in the host, samples are 16 kHz, and the screen changes with the dialog. Inspect a recording for clipping and compare mounted/unmounted room-noise pickup.
 4. Leave capture running for several minutes while repeatedly updating status and toggling the backlight. Check CRC/gap warnings and the LCD's `TX dropped` count. Kill/reopen the host once to check `STOP`/`PING` recovery. After a normal close, confirm `PING` works again.
@@ -87,7 +91,7 @@ uv run hb record --device stick --label knock --surface table --desc test --seco
 uv run hb run --device stick --knocker <knocker port>
 ```
 
-Compile, upload, SE board/power behavior, continuous physical capture, measured sample cadence, UART reliability, battery reporting, mounting performance, and backlight behavior remain **unverified on hardware**. No microphone, speaker, serial port, or attached device was accessed by the coding agent.
+FIX-02 was compiled, flashed, and tested on the attached SE with explicit user authorization. Idle PONG, live PCM, repeated open/close, already-streaming STOP/PING, discovery, and `hb listen --debug` worked; see [the measured results](../../reports/FIX-02.md). Some captures showed recoverable CRC/gap warnings, so long-duration UART reliability remains unverified. Pi hardware, calibrated sample cadence, battery accuracy, mounting performance, button/backlight behavior, and physical knock sensitivity still need human checks.
 
 ## Optional piezo path: UNTESTED, not implemented
 

@@ -6,7 +6,7 @@ from .audio import MicSource
 from .stickmic import StickMicSource, find_stick_ports
 
 
-def open_input(spec, cfg, bus=None):
+def open_input(spec, cfg, bus=None, *, debug=False):
     """Select an input; automatic stick discovery probes idle serial ports.
 
     The returned source opens its audio stream on iteration. ``cfg`` may be an
@@ -14,7 +14,7 @@ def open_input(spec, cfg, bus=None):
     """
     audio = getattr(cfg, "audio", cfg)
     if spec == "stick":
-        ports = find_stick_ports(bus=bus)
+        ports = find_stick_ports(bus=bus, **({"debug": True} if debug else {}))
         if not ports:
             raise ValueError(
                 "No M5StickC microphone found. Connect a stick running stickmic v1 "
@@ -29,4 +29,5 @@ def open_input(spec, cfg, bus=None):
         return MicSource(device=spec, block=audio.block, cfg=audio, bus=bus)
     return StickMicSource(
         port, baud=audio.stick_baud, gain_db=audio.stick_gain_db, bus=bus,
+        **({"debug": True} if debug else {}),
     )

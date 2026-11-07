@@ -11,7 +11,7 @@
 #include <freertos/task.h>
 
 // Wire/hardware constants; host gain and detector tuning live in profiles/*.yaml.
-static constexpr uint32_t SERIAL_BAUD = 921600;
+static constexpr uint32_t SERIAL_BAUD = 500000;  // CH552 bridge does not support 921600.
 static constexpr uint32_t SAMPLE_RATE = 16000;
 static constexpr size_t SAMPLE_COUNT = 256;
 static constexpr size_t FRAME_BYTES = 2 + 2 + 2 + SAMPLE_COUNT * 2 + 2;

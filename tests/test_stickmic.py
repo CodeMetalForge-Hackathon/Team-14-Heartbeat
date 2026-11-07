@@ -4,6 +4,7 @@ from dataclasses import replace
 import math
 import queue
 import struct
+import subprocess
 import threading
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from heartbeat.prompter import CompositePrompter, SerialKnocker, make_prompter
 @pytest.fixture(autouse=True)
 def no_hardware(monkeypatch):
     """An accidental default serial open or inventory must fail the test."""
+    inspect_os_owner = stickmic._os_port_in_use
     def forbidden(*args, **kwargs):
         raise AssertionError("tests must not access serial hardware or inventory")
 
@@ -28,6 +30,7 @@ def no_hardware(monkeypatch):
     monkeypatch.setattr(serial.tools.list_ports, "comports", forbidden)
     monkeypatch.setattr(stickmic, "_os_port_in_use", lambda port: False)
     monkeypatch.setattr(stickmic, "_PORTS", set())
+    return inspect_os_owner
 
 
 class Clock:
@@ -54,8 +57,11 @@ class SerialBytes:
         self.opened_at = self.closed_at = None
         self.read_sizes = []
         self.streaming = False
+        self.open_count = self.close_count = 0
+        self.operations = []
 
     def open(self):
+        self.open_count += 1
         assert self.dtr is False and self.rts is False
         assert self.exclusive is True
         assert self.port
@@ -75,7 +81,8 @@ class SerialBytes:
 
     def write(self, payload):
         self.writes.append(payload)
-        if payload == b"STOP\n":
+        self.operations.append(("write", payload))
+        if payload in (b"STOP\n", b"\nSTOP\n"):
             self.streaming = False
         elif payload == b"PING\n" and not self.streaming and self.pong is not None:
             self.pending.extend(self.pong)
@@ -84,7 +91,15 @@ class SerialBytes:
             self.pending.extend(self.stream)
         return len(payload)
 
+    def flush(self):
+        self.operations.append(("flush",))
+
+    def reset_input_buffer(self):
+        self.operations.append(("reset_input", bytes(self.pending)))
+        self.pending.clear()
+
     def close(self):
+        self.close_count += 1
         self.is_open = False
         self.closed_at = self.clock.now
 
@@ -147,8 +162,8 @@ def test_clean_frames_and_partial_reads_have_exact_samples_and_stream_time(max_r
     assert_times(blocks)
     np.testing.assert_array_equal(blocks[0].x, samples.astype(np.float32) / 32768)
     np.testing.assert_array_equal(blocks[1].x, (-samples).astype(np.float32) / 32768)
-    assert port.baudrate == 921600
-    assert port.writes == [b"PING\n", b"START\n", b"STOP\n"]
+    assert port.baudrate == 500000
+    assert port.writes == [b"\nSTOP\n", b"PING\n", b"START\n", b"STOP\n"]
     assert not port.is_open and not stickmic.port_in_use(source.port)
     assert not events
 
@@ -245,7 +260,7 @@ def test_source_recovers_an_abandoned_binary_stream_without_reset():
     source, port, events, _ = source_fixture(frame(0), ready=b"\xa5\x5a" + b"\x00" * 1400)
     port.streaming = True
     assert len(take_blocks(source, 1)) == 1
-    assert port.writes[:3] == [b"STOP\n", b"PING\n", b"START\n"]
+    assert port.writes[:3] == [b"\nSTOP\n", b"PING\n", b"START\n"]
     assert not events
 
 
@@ -284,6 +299,96 @@ def test_send_status_sanitizes_ascii_and_close_sends_stop_once():
         iterator.close()
 
 
+def test_preopened_source_reuses_one_claim_connection_and_start(monkeypatch):
+    source, port, events, _ = source_fixture(frame(0))
+    claim, release = stickmic.claim_port, stickmic.release_port
+    claims, releases, factories = [], [], []
+
+    def tracked_claim(key):
+        claims.append(key)
+        return claim(key)
+
+    def tracked_release(key):
+        releases.append(key)
+        release(key)
+
+    def factory():
+        factories.append(port)
+        return port
+
+    monkeypatch.setattr(stickmic, "claim_port", tracked_claim)
+    monkeypatch.setattr(stickmic, "release_port", tracked_release)
+    source.serial_factory = factory
+    iterator = iter(source)
+    try:
+        assert source._open()
+        assert source._open()
+        block = next(iterator)
+        assert_times([block])
+        assert block.x.any()
+        assert source._open()
+        assert claims == [stickmic.canonical_port(source.port)]
+        assert factories == [port] and port.open_count == 1
+        assert port.writes.count(b"START\n") == 1
+        assert not events
+    finally:
+        iterator.close()
+        source.close()
+        source.close()
+    assert port.close_count == 1 and port.writes.count(b"STOP\n") == 1
+    assert releases == claims
+    assert not stickmic.port_in_use(source.port)
+    assert not source._open()
+
+
+def test_preopened_source_with_a_closed_connection_releases_without_reclaiming(monkeypatch):
+    source, port, events, _ = source_fixture(frame(0))
+    claims = []
+    claim = stickmic.claim_port
+
+    def tracked_claim(key):
+        claims.append(key)
+        return claim(key)
+
+    monkeypatch.setattr(stickmic, "claim_port", tracked_claim)
+    assert source._open()
+    port.is_open = False  # The transport disappeared after successful startup.
+    try:
+        assert source._open() is False
+        assert claims == [stickmic.canonical_port(source.port)]
+        assert port.open_count == port.close_count == 1
+        assert port.writes.count(b"START\n") == 1
+        assert not stickmic.port_in_use(source.port)
+        assert [event.data["code"] for event in events] == ["stick_open_failed"]
+        assert source._open() is False  # A new source owns any later session.
+        assert len(claims) == 1
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("failure", ["identity", "serial_open"])
+def test_failed_direct_open_releases_resources_for_a_fresh_source(monkeypatch, failure):
+    failed, port, events, _ = source_fixture(frame(0), pong=b"PONG knocker v1\n")
+    if failure == "serial_open":
+        def fail_open():
+            raise OSError("fake serial open failure")
+
+        monkeypatch.setattr(port, "open", fail_open)
+    assert failed._open() is False
+    assert port.close_count == 1 and not port.is_open
+    assert not stickmic.port_in_use(failed.port)
+    assert events and events[0].data["code"] == "stick_open_failed"
+    assert b"START\n" not in port.writes
+    failed.close()
+    assert port.close_count == 1
+
+    fresh, fresh_port, fresh_events, _ = source_fixture(frame(0))
+    assert len(take_blocks(fresh, 1)) == 1
+    assert fresh_port.open_count == fresh_port.close_count == 1
+    assert fresh_port.writes.count(b"START\n") == 1
+    assert not fresh_events and not stickmic.port_in_use(fresh.port)
+
+
 @pytest.mark.parametrize("spec", [None, 0, 2, "Built-in Microphone", "2", "stick-shaped mic"])
 @pytest.mark.parametrize("whole_profile", [False, True])
 def test_open_input_preserves_regular_microphone_selection(monkeypatch, spec, whole_profile):
@@ -306,7 +411,8 @@ def test_open_input_preserves_regular_microphone_selection(monkeypatch, spec, wh
     ("stick:/dev/ttyUSB9", "/dev/ttyUSB9"),
     ("stick: COM7 ", "COM7"),
 ])
-def test_open_input_routes_sticks_and_passes_profile_gain(monkeypatch, spec, expected):
+@pytest.mark.parametrize("debug", [False, True])
+def test_open_input_routes_sticks_and_passes_profile_gain(monkeypatch, spec, expected, debug):
     audio = replace(load_profile().audio, stick_baud=460800, stick_gain_db=6.0)
     bus, scans, calls = EventBus(), [], []
     sentinel = object()
@@ -321,9 +427,39 @@ def test_open_input_routes_sticks_and_passes_profile_gain(monkeypatch, spec, exp
 
     monkeypatch.setattr(sources, "find_stick_ports", find)
     monkeypatch.setattr(sources, "StickMicSource", construct)
-    assert sources.open_input(spec, SimpleNamespace(audio=audio), bus) is sentinel
-    assert calls == [(expected, {"baud": 460800, "gain_db": 6.0, "bus": bus})]
-    assert scans == ([{"bus": bus}] if spec == "stick" else [])
+    assert sources.open_input(spec, SimpleNamespace(audio=audio), bus, debug=debug) is sentinel
+    debug_args = {"debug": True} if debug else {}
+    assert calls == [(expected, {"baud": 460800, "gain_db": 6.0, "bus": bus, **debug_args})]
+    assert scans == ([{"bus": bus, **debug_args}] if spec == "stick" else [])
+
+
+def test_explicit_stick_input_defers_discovery_claim_and_open_until_iteration(monkeypatch):
+    def no_discovery(**kwargs):
+        pytest.fail("an explicit stick port must not run discovery")
+
+    claims = []
+    claim = stickmic.claim_port
+
+    def tracked_claim(key):
+        claims.append(key)
+        return claim(key)
+
+    monkeypatch.setattr(sources, "find_stick_ports", no_discovery)
+    monkeypatch.setattr(stickmic, "claim_port", tracked_claim)
+    source = sources.open_input("stick:/dev/fake-stick", load_profile())
+    assert isinstance(source, stickmic.StickMicSource) and claims == []
+    clock = Clock()
+    port = SerialBytes(clock, stream=frame(0))
+    source.serial_factory = lambda: port
+    source.monotonic = clock.monotonic
+    iterator = iter(source)
+    assert claims == [] and port.open_count == 0
+    try:
+        assert next(iterator).x.any()
+        assert claims == [stickmic.canonical_port(source.port)] and port.open_count == 1
+    finally:
+        iterator.close()
+        source.close()
 
 
 @pytest.mark.parametrize("spec, message", [("stick", "No M5StickC"), ("stick:", "must follow"),
@@ -334,7 +470,7 @@ def test_open_input_reports_missing_sticks_and_empty_port(monkeypatch, spec, mes
         sources.open_input(spec, load_profile())
 
 
-def test_find_sticks_skips_busy_ports_rejects_wrong_identity_and_is_fast(monkeypatch):
+def test_find_sticks_skips_busy_ports_rejects_wrong_identity_and_has_a_bounded_boot_wait(monkeypatch):
     clock, opened = Clock(), []
     external = stickmic.canonical_port("/dev/external-busy")
     monkeypatch.setattr(stickmic, "_os_port_in_use", lambda port: port == external)
@@ -356,8 +492,9 @@ def test_find_sticks_skips_busy_ports_rejects_wrong_identity_and_is_fast(monkeyp
     )
     assert found == ["/dev/stick"]
     assert {port.port for port in opened} == set(replies)
-    assert all(not port.is_open and port.closed_at - port.opened_at <= 0.5 for port in opened)
-    assert all(port.writes == [b"STOP\n", b"PING\n"] for port in opened)
+    assert all(not port.is_open and port.closed_at - port.opened_at <=
+               stickmic.READY_TIMEOUT_S + stickmic.READ_POLL_S for port in opened)
+    assert all(port.writes == [b"\nSTOP\n", b"PING\n"] for port in opened)
     assert all(not stickmic.port_in_use(port) for port in replies)
 
 
@@ -370,6 +507,162 @@ def test_find_stick_recovers_binary_bytes_before_the_pong():
         monotonic=clock.monotonic,
     ) == ["/dev/orphan"]
     assert not port.is_open and not stickmic.port_in_use("/dev/orphan")
+
+
+@pytest.mark.parametrize("kind", ["source", "discovery"])
+def test_open_serial_timeout_is_unchanged_during_identification_and_audio_reads(kind):
+    clock = Clock()
+
+    class FixedTimeoutPort(SerialBytes):
+        def __setattr__(self, name, value):
+            if name == "timeout" and getattr(self, "is_open", False):
+                raise AssertionError("timeout changes after open reconfigure the serial baud")
+            super().__setattr__(name, value)
+
+    # Partial reads exercise repeated handshake polling and frame assembly.
+    port = FixedTimeoutPort(clock, stream=frame(0) + frame(1), max_read=7)
+    if kind == "source":
+        bus, events = EventBus(), []
+        bus.subscribe(events.append)
+        source = stickmic.StickMicSource("/dev/fixed-timeout", serial_factory=lambda: port,
+                                        monotonic=clock.monotonic, bus=bus)
+        blocks = take_blocks(source, 2)
+        assert_times(blocks)
+        assert all(block.x.any() for block in blocks) and not events
+        assert port.writes.count(b"START\n") == 1
+    else:
+        assert stickmic.find_stick_ports(
+            serial_factory=lambda: port, port_lister=lambda: ["/dev/fixed-timeout"],
+            monotonic=clock.monotonic,
+        ) == ["/dev/fixed-timeout"]
+        assert b"START\n" not in port.writes
+    assert port.timeout == stickmic.READ_POLL_S
+    assert port.open_count == port.close_count == 1
+    assert not stickmic.port_in_use("/dev/fixed-timeout")
+
+
+@pytest.mark.parametrize("kind", ["source", "discovery"])
+def test_recovery_finishes_partial_command_and_flushes_stale_input_before_ping(kind):
+    clock = Clock()
+    late_tail = b"late UART tail\x00\xff"
+
+    class InterruptedHostPort(SerialBytes):
+        def __init__(self):
+            super().__init__(clock, ready=frame(99), stream=frame(0))
+            self.streaming = True
+            self.rx = bytearray(b"STATUS POSSIBLE interrupted")
+            self.tail_injected = False
+
+        def write(self, payload):
+            self.writes.append(payload)
+            self.operations.append(("write", payload))
+            for byte in payload:
+                if byte != ord("\n"):
+                    self.rx.append(byte)
+                    continue
+                command = bytes(self.rx)
+                self.rx.clear()
+                if command == b"STOP":
+                    self.streaming = False
+                elif command == b"PING" and not self.streaming:
+                    self.pending.extend(self.pong)
+                elif command == b"START" and not self.streaming:
+                    self.streaming = True
+                    self.pending.extend(self.stream)
+            return len(payload)
+
+        def read(self, size):
+            chunk = super().read(size)
+            if not chunk and not self.tail_injected:
+                # UART bytes can arrive between the drain and input-buffer reset.
+                self.tail_injected = True
+                self.pending.extend(late_tail)
+            return chunk
+
+    port = InterruptedHostPort()
+    if kind == "source":
+        source = stickmic.StickMicSource("/dev/interrupted", serial_factory=lambda: port,
+                                        monotonic=clock.monotonic)
+        assert len(take_blocks(source, 1)) == 1
+    else:
+        assert stickmic.find_stick_ports(
+            serial_factory=lambda: port, port_lister=lambda: ["/dev/interrupted"],
+            monotonic=clock.monotonic,
+        ) == ["/dev/interrupted"]
+    stop = port.operations.index(("write", b"\nSTOP\n"))
+    flush = port.operations.index(("flush",))
+    reset = port.operations.index(("reset_input", late_tail))
+    ping = port.operations.index(("write", b"PING\n"))
+    assert stop < flush < reset < ping
+    assert port.writes.count(b"PING\n") == 1
+    assert not port.is_open and not stickmic.port_in_use("/dev/interrupted")
+
+
+@pytest.mark.parametrize("ownership", ["timeout", "timeout_with_pid", "positive_pid"])
+def test_macos_lsof_requires_a_positive_owner_to_block_claim(monkeypatch, no_hardware, ownership):
+    port = "/dev/cu.fix02-fake-stick"
+    calls = []
+    monkeypatch.setattr(stickmic.sys, "platform", "darwin")
+    monkeypatch.setattr(stickmic.Path, "exists", lambda path: str(path) == port)
+    monkeypatch.setattr(stickmic, "_os_port_in_use", no_hardware)
+
+    def lsof(command, **kwargs):
+        calls.append((command, kwargs))
+        if ownership == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if ownership == "timeout_with_pid":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"], output=b"123\n")
+        return SimpleNamespace(stdout=b"4321\n", returncode=0)
+
+    monkeypatch.setattr(stickmic.subprocess, "run", lsof)
+    assert stickmic.claim_port(port) is (ownership == "timeout")
+    assert len(calls) == 1 and calls[0][0][:3] == ["/usr/sbin/lsof", "-nP", "-t"]
+    stickmic.release_port(port)
+
+
+@pytest.mark.parametrize("length", [73, 700])
+@pytest.mark.parametrize("kind", ["source", "discovery"])
+def test_debug_failure_previews_handshake_bytes_once_with_a_200_byte_limit(capsys, length, kind):
+    raw = (bytes(range(256)) * 3)[:length]
+    source, port, events, clock = source_fixture(b"", ready=raw, pong=None, debug=True)
+    if kind == "source":
+        assert source._open() is False
+        source.close()
+        assert events[0].data["code"] == "stick_open_failed"
+    else:
+        assert stickmic.find_stick_ports(
+            serial_factory=lambda: port, port_lister=lambda: [source.port],
+            monotonic=clock.monotonic, debug=True,
+        ) == []
+    assert b"START\n" not in port.writes
+    preview = capsys.readouterr()
+    shown = raw[:200]
+    assert preview.err == f"stickmic {source.port}: raw first {len(shown)} bytes: {shown!r}\n"
+    assert preview.out == ""
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_listen_cli_passes_debug_to_stick_input_without_opening_hardware(monkeypatch, debug):
+    from heartbeat import cli
+
+    selected, calls, runs = object(), [], []
+
+    def select(spec, cfg, bus, **kwargs):
+        calls.append((spec, kwargs))
+        return selected
+
+    def pipeline(source, *args):
+        assert source is selected
+        return SimpleNamespace(run=lambda: runs.append(True))
+
+    monkeypatch.setattr(cli, "open_input", select)
+    monkeypatch.setattr(cli, "Pipeline", pipeline)
+    monkeypatch.setattr(cli, "OnsetDetector", lambda cfg: object())
+    monkeypatch.setattr(cli, "make_classifier", lambda *args, **kwargs: object())
+    args = ["listen", "--device", "stick:/dev/fake-stick"]
+    assert cli.main(args + (["--debug"] if debug else [])) == 0
+    assert calls == [("stick:/dev/fake-stick", {"debug": True} if debug else {})]
+    assert runs == [True]
 
 
 @pytest.mark.parametrize("kind", ["source", "discovery"])
@@ -396,8 +689,72 @@ def test_printable_binary_suffix_requires_a_fresh_clean_pong(kind):
             serial_factory=lambda: port, port_lister=lambda: ["/dev/orphan"],
             monotonic=clock.monotonic,
         ) == ["/dev/orphan"]
-    assert port.writes[:3] == [b"STOP\n", b"PING\n", b"PING\n"]
+    assert port.writes[:3] == [b"\nSTOP\n", b"PING\n", b"PING\n"]
     assert not port.is_open
+
+
+@pytest.mark.parametrize("kind", ["source", "discovery"])
+@pytest.mark.parametrize("pong", [b"PONG stickmic v1\n", None], ids=["valid_pong", "ready_only"])
+@pytest.mark.parametrize("ready_delay", [0, 0.5], ids=["immediate_boot", "delayed_boot"])
+def test_rom_garbage_joined_to_ready_retries_stop_and_ping_and_requires_pong(kind, pong, ready_delay):
+    clock = Clock()
+
+    class BootingPort(SerialBytes):
+        first_ping = True
+        ready_at = None
+        boot_announced = False
+        rx_aligned = False
+
+        def write(self, payload):
+            if payload == b"\nSTOP\n" and self.boot_announced:
+                self.rx_aligned = True
+            if payload == b"PING\n" and self.first_ping:
+                self.first_ping = False
+                self.writes.append(payload)
+                self.operations.append(("write", payload))
+                self.ready_at = self.clock.now + ready_delay
+                return len(payload)
+            if payload == b"PING\n" and not self.rx_aligned:
+                self.writes.append(payload)
+                self.operations.append(("write", payload))
+                self.pending.extend(b"ERR line\r\n")
+                return len(payload)
+            return super().write(payload)
+
+        def read(self, size):
+            if self.ready_at is not None and not self.boot_announced and self.clock.now >= self.ready_at:
+                self.boot_announced = True
+                # The initial commands arrived at the ROM's old baud. READY
+                # follows its garbage without LF and RX still needs a new STOP.
+                self.pending.extend(b"\x80garbleREADY stickmic v1 rate=16000\r\nERR line\r\n")
+            return super().read(size)
+
+    port = BootingPort(clock, ready=b"", stream=frame(0), pong=pong)
+    if kind == "source":
+        bus, events = EventBus(), []
+        bus.subscribe(events.append)
+        source = stickmic.StickMicSource("/dev/booting", serial_factory=lambda: port,
+                                        monotonic=clock.monotonic, bus=bus)
+        if pong is not None:
+            assert len(take_blocks(source, 1)) == 1
+            assert not events
+        else:
+            assert list(source) == []
+            assert events[0].data["code"] == "stick_open_failed"
+    else:
+        found = stickmic.find_stick_ports(
+            serial_factory=lambda: port, port_lister=lambda: ["/dev/booting"],
+            monotonic=clock.monotonic,
+        )
+        assert found == (["/dev/booting"] if pong is not None else [])
+    assert port.writes.count(b"PING\n") == 2
+    assert port.writes[:4] == [b"\nSTOP\n", b"PING\n", b"\nSTOP\n", b"PING\n"]
+    before_start = port.writes[:port.writes.index(b"START\n")] if b"START\n" in port.writes else port.writes
+    assert before_start.count(b"\nSTOP\n") == 2
+    assert (b"START\n" in port.writes) is (kind == "source" and pong is not None)
+    assert clock.now >= ready_delay
+    assert port.open_count == port.close_count == 1
+    assert not stickmic.port_in_use("/dev/booting")
 
 
 def test_status_sink_formats_each_supported_event_and_ignores_audio_events():

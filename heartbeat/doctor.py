@@ -30,7 +30,10 @@ from .audio import SAMPLE_RATE, list_devices
 from .classify import make_classifier
 from .config import _profile_dir
 from .sources import open_input
-from .stickmic import canonical_port, claim_port, new_serial_connection, release_port
+from .stickmic import (
+    READY_TIMEOUT_S, _identify_stick, canonical_port, claim_port,
+    new_serial_connection, release_port,
+)
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -39,8 +42,8 @@ _IDENTITIES = {
     "PONG knocker v1": "knocker",
     "PONG rover v1": "rover",
 }
-# Firmware protocol baud rates, rather than user-facing diagnostic tuning.
-_BAUDS = (921600, 115200)
+# Knocker/rover protocol baud; the stick uses the selected audio profile.
+_CONTROL_BAUD = 115200
 
 
 @dataclass(frozen=True)
@@ -111,8 +114,8 @@ def probe_audio_devices() -> list[dict]:
     return list_devices()
 
 
-def _probe_identity(port: str, baud: int, settings: dict) -> str | None:
-    """PING an exclusively claimed port without reset pulses or actuation."""
+def _probe_identity(port: str, baud: int, settings: dict, *, stick=False) -> str | None:
+    """Identify a claimed port without starting capture or moving hardware."""
     cfg = settings["doctor"]
     claim = canonical_port(port)
     if not claim_port(claim):
@@ -123,12 +126,16 @@ def _probe_identity(port: str, baud: int, settings: dict) -> str | None:
             port, baud, cfg["serial_read_poll_s"],
             write_timeout=cfg["serial_write_timeout_s"],
         )
+        if stick:
+            # A fresh SE port open can reset the board despite low modem lines.
+            # Reuse boot-line recovery and allow the runtime startup deadline.
+            _identify_stick(connection, time.monotonic() + READY_TIMEOUT_S, time.monotonic)
+            return "PONG stickmic v1"
         if connection.write(b"PING\n") != len(b"PING\n"):
             raise OSError("Incomplete PING write")
         deadline = time.monotonic() + cfg["serial_timeout_s"]
         pending = bytearray()
         while time.monotonic() < deadline:
-            connection.timeout = min(cfg["serial_read_poll_s"], max(0, deadline - time.monotonic()))
             byte = connection.read(1)
             if not byte:
                 if not getattr(connection, "is_open", True):
@@ -156,7 +163,7 @@ def _probe_identity(port: str, baud: int, settings: dict) -> str | None:
             release_port(claim)
 
 
-def probe_serial_ports(settings: dict) -> dict:
+def probe_serial_ports(profile, settings: dict) -> dict:
     result = {"stick": [], "knocker": [], "rover": [], "ports": [], "errors": []}
     seen = set()
     for entry in sorted(list_ports.comports(), key=lambda item: str(getattr(item, "device", item))):
@@ -169,11 +176,11 @@ def probe_serial_ports(settings: dict) -> dict:
         if getattr(entry, "is_open", False):
             result["errors"].append(f"{port}: already open; skipped")
             continue
-        for baud in _BAUDS:
+        for baud, stick in ((profile.audio.stick_baud, True), (_CONTROL_BAUD, False)):
             try:
-                identity = _probe_identity(port, baud, settings)
+                identity = _probe_identity(port, baud, settings, stick=stick)
                 kind = _IDENTITIES.get(identity)
-                if kind is not None and ((kind == "stick") == (baud == _BAUDS[0])):
+                if kind is not None and ((kind == "stick") == stick):
                     result[kind].append(port)
                     break
             except Exception as exc:
@@ -196,7 +203,7 @@ def probe_audio(profile, device, settings: dict) -> dict:
     bus.subscribe(lambda event: result["errors"].append(str(event.data.get("message", event.data)))
                   if event.type == "error" and event.data.get("severity") != "warning" else None)
     if device == "stick":
-        ports = probe_serial_ports(settings)["stick"]
+        ports = probe_serial_ports(profile, settings)["stick"]
         if not ports:
             raise OSError("No port answered PONG stickmic v1")
         device = "stick:" + ports[0]
@@ -392,7 +399,7 @@ def run_doctor(profile, *, device="stick", speaker_device=None, play=False, sett
     serials = {kind: [] for kind in ("stick", "knocker", "rover")}
     serial_error = ""
     try:
-        serials.update(probe_serial_ports(settings))
+        serials.update(probe_serial_ports(profile, settings))
         serial_error = "; ".join(serials.get("errors", []))
     except Exception as exc:
         serial_error = str(exc)

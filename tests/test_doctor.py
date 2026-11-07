@@ -65,7 +65,7 @@ def healthy_probes(monkeypatch):
         "index": 4, "name": "USB Contact Mic", "max_input_channels": 1,
         "max_output_channels": 0, "is_default_input": True,
     }])
-    monkeypatch.setattr(doctor, "probe_serial_ports", lambda settings: {
+    monkeypatch.setattr(doctor, "probe_serial_ports", lambda profile, settings: {
         "ports": ["/dev/not-a-stick-name", "/dev/not-a-knocker-name", "/dev/not-a-rover-name"],
         "stick": ["/dev/not-a-stick-name"], "knocker": ["/dev/not-a-knocker-name"],
         "rover": ["/dev/not-a-rover-name"], "errors": [],
@@ -256,7 +256,7 @@ def test_doctor_rejects_wrong_python_and_low_disk_with_fix_hints(
 def test_doctor_requires_selected_stick_and_knocker_but_rover_is_optional(
     monkeypatch, profile, settings, healthy_probes,
 ):
-    monkeypatch.setattr(doctor, "probe_serial_ports", lambda settings: {
+    monkeypatch.setattr(doctor, "probe_serial_ports", lambda profile, settings: {
         "ports": [], "stick": [], "knocker": [], "rover": [], "errors": [],
     })
     checks = doctor.run_doctor(profile, device="stick", settings=settings)
@@ -354,7 +354,94 @@ def test_serial_identity_probe_releases_port_if_open_fails(monkeypatch, settings
     assert not stickmic.port_in_use("/dev/arbitrary-name")
 
 
-def test_serial_inventory_uses_replies_instead_of_port_names(monkeypatch, settings):
+@pytest.mark.parametrize("stick_baud", [500000, 750000, 115200])
+def test_serial_inventory_uses_profile_stick_baud_and_control_protocol_baud(
+    monkeypatch, profile, settings, stick_baud,
+):
+    profile = replace(profile, audio=replace(profile.audio, stick_baud=stick_baud))
+    replies = {"/dev/a-stick": "PONG stickmic v1", "/dev/b-knocker": "PONG knocker v1",
+               "/dev/c-rover": "PONG rover v1"}
+    calls = []
+
+    def probe(port, baud, selected_settings, *, stick=False):
+        assert selected_settings is settings
+        calls.append((port, baud, stick))
+        if stick:
+            assert baud == stick_baud
+            return replies[port] if port == "/dev/a-stick" else None
+        assert baud == 115200
+        return replies[port]
+
+    monkeypatch.setattr(doctor.list_ports, "comports", lambda: [
+        SimpleNamespace(device=port) for port in replies
+    ])
+    monkeypatch.setattr(doctor, "_probe_identity", probe)
+    result = doctor.probe_serial_ports(profile, settings)
+    assert result["stick"] == ["/dev/a-stick"]
+    assert result["knocker"] == ["/dev/b-knocker"]
+    assert result["rover"] == ["/dev/c-rover"]
+    assert calls == [("/dev/a-stick", stick_baud, True),
+                     ("/dev/b-knocker", stick_baud, True), ("/dev/b-knocker", 115200, False),
+                     ("/dev/c-rover", stick_baud, True), ("/dev/c-rover", 115200, False)]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_stick_identity_probe_reuses_runtime_recovery_and_startup_timeout(
+    monkeypatch, profile, settings, failure,
+):
+    clock = FakeClock()
+    clock.now = 0.2
+    connection = FakeSerial(clock, b"")
+    opened, identified = [], []
+
+    def open_connection(port, baud, timeout, **kwargs):
+        opened.append((port, baud, timeout, kwargs["write_timeout"]))
+        return connection
+
+    def identify(selected, deadline, monotonic):
+        assert selected is connection
+        assert deadline == pytest.approx(clock.now + stickmic.READY_TIMEOUT_S)
+        assert deadline - monotonic() > settings["doctor"]["serial_timeout_s"]
+        assert stickmic.port_in_use("/dev/stick")
+        identified.append(True)
+        if failure:
+            raise TimeoutError("fake startup did not finish")
+
+    monkeypatch.setattr(doctor.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(doctor, "new_serial_connection", open_connection)
+    monkeypatch.setattr(doctor, "_identify_stick", identify)
+    if failure:
+        with pytest.raises(TimeoutError, match="startup"):
+            doctor._probe_identity("/dev/stick", profile.audio.stick_baud, settings, stick=True)
+    else:
+        assert doctor._probe_identity("/dev/stick", profile.audio.stick_baud, settings,
+                                      stick=True) == "PONG stickmic v1"
+    assert identified == [True]
+    assert opened == [("/dev/stick", profile.audio.stick_baud,
+                       settings["doctor"]["serial_read_poll_s"],
+                       settings["doctor"]["serial_write_timeout_s"])]
+    assert connection.writes == []  # The reused helper owns STOP/drain/PING, never START.
+    assert connection.closed and not stickmic.port_in_use("/dev/stick")
+
+
+def test_control_identity_probe_keeps_the_open_serial_timeout_fixed(monkeypatch, settings):
+    clock = FakeClock()
+
+    class FixedTimeoutSerial(FakeSerial):
+        def __setattr__(self, name, value):
+            if name == "timeout":
+                pytest.fail("read polling must not reconfigure an open serial port")
+            super().__setattr__(name, value)
+
+    connection = FixedTimeoutSerial(clock, b"PONG knocker v1\n")
+    monkeypatch.setattr(doctor.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(doctor, "new_serial_connection", lambda *args, **kwargs: connection)
+    assert doctor._probe_identity("/dev/control", 115200, settings) == "PONG knocker v1"
+    assert connection.writes == [b"PING\n"]
+    assert connection.closed and not stickmic.port_in_use("/dev/control")
+
+
+def test_serial_inventory_uses_replies_instead_of_port_names(monkeypatch, profile, settings):
     replies = {"/dev/knocker-looking-name": "PONG stickmic v1",
                "/dev/stick-looking-name": "PONG rover v1",
                "/dev/rover-looking-name": "PONG knocker v1",
@@ -362,8 +449,8 @@ def test_serial_inventory_uses_replies_instead_of_port_names(monkeypatch, settin
     monkeypatch.setattr(doctor.list_ports, "comports", lambda: [
         SimpleNamespace(device=port) for port in replies
     ])
-    monkeypatch.setattr(doctor, "_probe_identity", lambda port, baud, settings: replies[port])
-    result = doctor.probe_serial_ports(settings)
+    monkeypatch.setattr(doctor, "_probe_identity", lambda port, baud, settings, **kwargs: replies[port])
+    result = doctor.probe_serial_ports(profile, settings)
     assert result["stick"] == ["/dev/knocker-looking-name"]
     assert result["knocker"] == ["/dev/rover-looking-name"]
     assert result["rover"] == ["/dev/stick-looking-name"]

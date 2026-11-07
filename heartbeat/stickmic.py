@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 MAGIC = b"\xa5\x5a"
 BLOCK_SAMPLES = 256
 FRAME_BYTES = 520
-BAUD_RATE = 921600
+BAUD_RATE = 500000  # Supported by the StickC-Plus SE's CH552 USB bridge.
 # Protocol/transport bounds, not audio or detector tuning parameters.
 READY_TIMEOUT_S = 3.0
 READ_POLL_S = 0.05
@@ -40,6 +40,7 @@ MAX_LINE_BYTES = 512
 MAX_STATUS_TEXT = 40
 SEQ_MODULUS = 1 << 16
 SEQ_HALF_RANGE = SEQ_MODULUS // 2
+DEBUG_BYTES = 200  # Fixed diagnostic preview requested by --debug.
 _PORTS: set[str] = set()
 _PORTS_LOCK = threading.Lock()
 
@@ -88,7 +89,7 @@ def _os_port_in_use(port: str) -> bool:
         try:
             for process in Path("/proc").iterdir():
                 if time.monotonic() >= deadline:
-                    return True
+                    return False  # No owner found; the exclusive open decides.
                 if not process.name.isdigit():
                     continue
                 try:
@@ -110,8 +111,10 @@ def _os_port_in_use(port: str) -> bool:
                 capture_output=True, timeout=0.1, check=False,
             )
             return bool(result.stdout.strip())
-        except subprocess.TimeoutExpired:
-            return True  # An uncertain owner is safer to skip during discovery.
+        except subprocess.TimeoutExpired as exc:
+            # A slow lsof is not evidence of ownership. In-process claims and
+            # the subsequent exclusive serial open still prevent double use.
+            return bool(exc.stdout and exc.stdout.strip())
         except OSError:
             pass
     return False
@@ -179,11 +182,34 @@ def crc16(data: bytes | bytearray) -> int:
     return binascii.crc_hqx(data, 0xFFFF)
 
 
-def _read_line(connection, deadline: float, monotonic) -> str | None:
+class _RawPreview:
+    """Capture original wire bytes without consuming an extra serial read."""
+
+    def __init__(self, port):
+        self.port = port
+        self.data = bytearray()
+        self.printed = False
+
+    def capture(self, chunk):
+        self.data.extend(chunk[:max(0, DEBUG_BYTES - len(self.data))])
+        if len(self.data) == DEBUG_BYTES:
+            self.finish()
+        return chunk
+
+    def finish(self):
+        if not self.printed:
+            print(f"stickmic {self.port}: raw first {len(self.data)} bytes: "
+                  f"{bytes(self.data)!r}", file=sys.stderr, flush=True)
+            self.printed = True
+
+
+def _read_line(connection, deadline: float, monotonic, *, read=None) -> str | None:
+    read = connection.read if read is None else read
     pending = bytearray()
     while monotonic() < deadline:
-        connection.timeout = min(READ_POLL_S, max(0.0, deadline - monotonic()))
-        byte = connection.read(1)
+        # Keep the timeout configured before open. Pyserial timeout assignment
+        # reconfigures termios, including custom baud, even for the same value.
+        byte = read(1)
         if not byte:
             if not getattr(connection, "is_open", True):
                 raise OSError("Serial device disconnected")
@@ -212,10 +238,47 @@ def _is_stick_pong(line: str | None) -> bool:
     return False
 
 
+def _identify_stick(connection, deadline, monotonic, *, read=None):
+    """Recover text mode even after a crashed host left PCM or a partial command."""
+    read = connection.read if read is None else read
+
+    def write(payload):
+        if connection.write(payload) != len(payload):
+            raise OSError("Incomplete stick microphone command write")
+
+    # The leading LF terminates any command left half-written by another host.
+    write(b"\nSTOP\n")
+    connection.flush()
+    drain_end = min(deadline, monotonic() + PROBE_TIMEOUT_S)
+    while monotonic() < drain_end:
+        if not read(FRAME_BYTES):
+            break
+    connection.reset_input_buffer()
+    write(b"PING\n")
+    while monotonic() < deadline:
+        line = _read_line(connection, deadline, monotonic, read=read)
+        if _is_stick_pong(line):
+            return
+        if line is not None and (line.endswith("PONG stickmic v1")
+                                 or "READY stickmic v1" in line):
+            # A boot or a late printable binary tail can obscure the first reply.
+            # ROM boot text uses another baud and may join READY without an LF.
+            # READY only triggers a retry; a fresh exact PONG proves identity.
+            if "READY stickmic v1" in line:
+                # Commands sent during boot may leave a partial RX command.
+                write(b"\nSTOP\n")
+            write(b"PING\n")
+        elif line is None:
+            break
+        elif line.startswith(("PONG", "READY ")):
+            raise OSError(f"Serial device is not a stick microphone: {line}")
+    raise TimeoutError("No PONG stickmic v1 reply after STOP/flush/PING")
+
+
 class StickMicSource:
     def __init__(
         self, port: str, baud: int = BAUD_RATE, gain_db: float = 0.0, bus=None, *,
-        serial_factory=None, monotonic=None,
+        serial_factory=None, monotonic=None, debug=False,
     ) -> None:
         if not isinstance(port, str) or not port.strip():
             raise ValueError("A stick microphone serial port is required")
@@ -230,12 +293,14 @@ class StickMicSource:
         self.garbage_bytes = 0
         self._gain = 10.0 ** (self.gain_db / 20.0)
         self._connection = None
+        self._lifecycle_lock = threading.RLock()
         self._write_lock = threading.Lock()
         self._closed = threading.Event()
         self._streaming = False
         self._claimed = False
         self._claim_key = canonical_port(port)
         self._delivered = 0
+        self._debug = _RawPreview(port) if debug else None
 
     def _report(self, message: str, *, code: str, severity: str = "error", **data) -> None:
         if self.bus is not None:
@@ -257,8 +322,26 @@ class StickMicSource:
                 raise OSError("Incomplete stick microphone command write")
         return True
 
+    def _read(self, size):
+        if self._closed.is_set() or self._connection is None:
+            raise OSError("Stick microphone is closed")
+        chunk = self._connection.read(size)
+        return self._debug.capture(chunk) if self._debug is not None else chunk
+
     def _open(self) -> bool:
+        # Serial setup and ownership form one lifecycle, including direct
+        # pre-open calls followed by iteration and concurrent close requests.
+        with self._lifecycle_lock:
+            return self._open_once()
+
+    def _open_once(self) -> bool:
         if self._closed.is_set():
+            return False
+        if self._claimed:
+            if self._streaming and self._connection is not None and self._connection.is_open:
+                return True
+            self._report("Stick microphone disconnected", code="stick_open_failed")
+            self.close()
             return False
         try:
             self._claim_key = canonical_port(self.port)
@@ -273,37 +356,8 @@ class StickMicSource:
                     connection.close()
                     return False
                 self._connection = connection
-            deadline = self.monotonic() + READY_TIMEOUT_S
-            ready = False
-            while not self._closed.is_set():
-                line = _read_line(connection, deadline, self.monotonic)
-                if line is None:
-                    break
-                if line.startswith("READY stickmic v1"):
-                    ready = True
-                    break
-                if line.startswith(("READY ", "PONG ")):
-                    raise OSError(f"Serial device is not a stick microphone: {line}")
-            if not ready and not self._write("STOP"):
-                return False
-            if not self._write("PING"):
-                return False
-            deadline = self.monotonic() + PROBE_TIMEOUT_S
-            while not self._closed.is_set():
-                line = _read_line(connection, deadline, self.monotonic)
-                if _is_stick_pong(line):
-                    break
-                if line is not None and line.endswith("PONG stickmic v1"):
-                    # A final binary suffix may itself be printable ASCII.
-                    # Ask again now that STOP has established text mode, and
-                    # require a fresh identity within the original deadline.
-                    if not self._write("PING"):
-                        return False
-                    continue
-                if line is None:
-                    raise TimeoutError("No PONG stickmic v1 reply")
-                if line.startswith(("PONG", "READY knocker")):
-                    raise OSError(f"Unexpected stick microphone reply: {line}")
+            _identify_stick(connection, self.monotonic() + READY_TIMEOUT_S,
+                            self.monotonic, read=self._read)
             if not self._write("START"):
                 return False
             self._streaming = True
@@ -312,6 +366,9 @@ class StickMicSource:
             if not self._closed.is_set():
                 self._report(f"Could not open stick microphone: {exc}", code="stick_open_failed")
             return False
+        finally:
+            if not self._streaming:
+                self.close()  # Failed pre-open calls must release their claim too.
 
     def _frames(self) -> Iterator[tuple[int, np.ndarray]]:
         pending = bytearray()
@@ -358,8 +415,7 @@ class StickMicSource:
             connection = self._connection
             if connection is None or not getattr(connection, "is_open", True):
                 raise OSError("Stick microphone disconnected")
-            connection.timeout = min(READ_POLL_S, max(0.0, deadline - self.monotonic()))
-            chunk = connection.read(FRAME_BYTES - len(pending))
+            chunk = self._read(FRAME_BYTES - len(pending))
             if chunk:
                 pending.extend(chunk)
 
@@ -422,7 +478,7 @@ class StickMicSource:
     def close(self) -> None:
         self._closed.set()
         errors = []
-        with self._write_lock:
+        with self._lifecycle_lock, self._write_lock:
             connection, self._connection = self._connection, None
             self._streaming = False
             if connection is not None:
@@ -439,6 +495,8 @@ class StickMicSource:
             if self._claimed:
                 release_port(self._claim_key)
                 self._claimed = False
+            if self._debug is not None:
+                self._debug.finish()
         for exc in errors:
             self._report(f"Stick microphone shutdown failed: {exc}", code="stick_close_failed")
 
@@ -526,8 +584,9 @@ class StickStatusSink:
             self._writer.join(timeout=2 * WRITE_TIMEOUT_S)
 
 
-def find_stick_ports(*, bus=None, serial_factory=None, port_lister=None, monotonic=None) -> list[str]:
-    """Recover abandoned streams, then identify idle sticks with a fast PING."""
+def find_stick_ports(*, bus=None, serial_factory=None, port_lister=None, monotonic=None,
+                     debug=False) -> list[str]:
+    """Recover abandoned streams and allow bridges that reset the stick on open."""
     monotonic = monotonic or time.monotonic
     try:
         ports = (port_lister() if port_lister is not None else
@@ -547,27 +606,18 @@ def find_stick_ports(*, bus=None, serial_factory=None, port_lister=None, monoton
         if getattr(entry, "is_open", False) or not claim_port(claim_key):
             continue
         connection = None
+        preview = _RawPreview(port) if debug else None
         try:
             connection = new_serial_connection(
                 port, BAUD_RATE, READ_POLL_S, write_timeout=READ_POLL_S,
                 serial_factory=serial_factory,
             )
-            deadline = monotonic() + PROBE_TIMEOUT_S
-            if connection.write(b"STOP\n") != len(b"STOP\n"):
-                continue
-            if connection.write(b"PING\n") != len(b"PING\n"):
-                continue
-            while monotonic() < deadline:
-                line = _read_line(connection, deadline, monotonic)
-                if _is_stick_pong(line):
-                    result.append(port)
-                    break
-                if line is not None and line.endswith("PONG stickmic v1"):
-                    if connection.write(b"PING\n") != len(b"PING\n"):
-                        break
-                    continue
-                if line is None or line.startswith("PONG"):
-                    break
+            def read(size):
+                chunk = connection.read(size)
+                return preview.capture(chunk) if preview is not None else chunk
+
+            _identify_stick(connection, monotonic() + READY_TIMEOUT_S, monotonic, read=read)
+            result.append(port)
         except Exception as exc:
             log.debug("Stick microphone probe skipped %s: %s", port, exc)
         finally:
@@ -577,4 +627,6 @@ def find_stick_ports(*, bus=None, serial_factory=None, port_lister=None, monoton
                 except Exception:
                     pass
             release_port(claim_key)
+            if preview is not None:
+                preview.finish()
     return result

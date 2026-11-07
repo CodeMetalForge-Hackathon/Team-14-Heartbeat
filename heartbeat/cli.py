@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--wav", type=Path, help="process a WAV without a microphone")
     listen.add_argument("--profile", default="rubble")
     listen.add_argument("--realtime", action="store_true", help="pace WAV replay")
+    listen.add_argument("--debug", action="store_true", help="print the first 200 raw stick serial bytes")
     record = commands.add_parser("record", help="record labeled 16 kHz PCM audio")
     record.add_argument("--label", required=True, choices=["knock", "other", "bg", "self"])
     record.add_argument("--surface", required=True)
@@ -211,7 +212,7 @@ def _listen(args, profile, bus) -> int:
     source = (
         WavSource(args.wav, realtime=args.realtime, block=cfg.block)
         if args.wav is not None
-        else open_input(args.device, cfg, bus)
+        else open_input(args.device, cfg, bus, **({"debug": True} if args.debug else {}))
     )
     pipeline = Pipeline(
         source, OnsetDetector(profile.onset), make_classifier(profile, bus=bus), bus, profile
