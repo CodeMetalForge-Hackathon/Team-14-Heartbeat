@@ -1,0 +1,135 @@
+audio:
+  # Contract sample rate for processing and recordings, in Hz.
+  sample_rate: 16000
+  # Contract processing hop, in samples.
+  block: 256
+  # Maximum queued microphone blocks before the oldest is dropped.
+  queue_blocks: 32
+  # Frequency of level events sent to subscribers, in Hz.
+  level_hz: 10.0
+  # Interval between console level meters, in seconds.
+  console_level_s: 1.0
+  # Lower bound of the console meter, in dBFS.
+  meter_min_dbfs: -80.0
+  # Upper bound of the console meter, in dBFS.
+  meter_max_dbfs: 0.0
+  # Number of characters in the console meter.
+  meter_width: 24
+  # Countdown before a labeled recording, in seconds.
+  record_countdown_s: 3
+  # Warn when a recording's absolute peak exceeds this value.
+  record_clip_peak: 0.99
+  # Warn when a recording's absolute peak is below this value.
+  record_quiet_peak: 0.02
+  synth:
+    # Peak amplitude used to normalize individual generated sounds.
+    peak: 0.8
+    scene:
+      # Default generated scene duration, in seconds.
+      duration_s: 60.0
+      # Default random seed for the synth command.
+      seed: 1
+      # Default background RMS level, in dBFS.
+      bg_dbfs: -50.0
+      # Time of the first sound in the CLI demo, in seconds.
+      first_event_s: 0.75
+      # Spacing between CLI demo sounds, in seconds.
+      interval_s: 0.8
+      # Gain applied to each CLI demo sound, in dB.
+      gain_db: -6.0
+      # Repeating sound sequence in the CLI demo scene.
+      kinds: [knock, footstep, knock, clap, knock, speech_like, knock, drop]
+    knock:
+      # Total knock waveform length, in seconds.
+      duration_s: 0.2
+      # Minimum number of resonant modes.
+      modes_min: 2
+      # Maximum number of resonant modes.
+      modes_max: 3
+      # Lowest resonant mode frequency, in Hz.
+      low_hz: 150.0
+      # Highest resonant mode frequency, in Hz.
+      high_hz: 1200.0
+      # Shortest exponential decay constant, in seconds.
+      decay_min_s: 0.01
+      # Longest exponential decay constant, in seconds.
+      decay_max_s: 0.04
+      # Initial click duration, in seconds.
+      click_s: 0.002
+      # Initial click amplitude relative to the resonant modes.
+      click_gain: 0.35
+    footstep:
+      # Total low-thump waveform length, in seconds.
+      duration_s: 0.35
+      # Lowest thump frequency, in Hz.
+      low_hz: 50.0
+      # Highest thump frequency, in Hz.
+      high_hz: 120.0
+      # Thump exponential decay constant, in seconds.
+      decay_s: 0.06
+    clap:
+      # Total broadband burst length, in seconds.
+      duration_s: 0.2
+      # Broadband burst exponential decay constant, in seconds.
+      decay_s: 0.025
+    speech_like:
+      # Total modulated noise length, in seconds.
+      duration_s: 0.7
+      # Lower speech-like band edge, in Hz.
+      low_hz: 300.0
+      # Upper speech-like band edge, in Hz.
+      high_hz: 3000.0
+      # Envelope modulation frequency, in Hz.
+      modulation_hz: 4.0
+      # Envelope modulation depth, between zero and one.
+      modulation_depth: 0.8
+    drop:
+      # Total bouncing-object waveform length, in seconds.
+      duration_s: 0.8
+      # Minimum number of bounces.
+      bounces_min: 2
+      # Maximum number of bounces.
+      bounces_max: 4
+      # Delay between the first two bounces, in seconds.
+      first_gap_s: 0.14
+      # Ratio by which the delay shrinks after each bounce.
+      gap_ratio: 0.65
+      # Ratio by which amplitude shrinks after each bounce.
+      gain_ratio: 0.6
+    background:
+      # Default standalone background waveform duration, in seconds.
+      duration_s: 1.0
+      # Frequency below which the pink-noise spectrum flattens, in Hz.
+      low_hz: 20.0
+      # Frequency-domain amplitude exponent for pinkish noise.
+      pink_exponent: 0.5
+onset:
+  # Second-order high-pass cutoff, in Hz.
+  highpass_hz: 60.0
+  # Required hop RMS above the estimated noise floor, in dB.
+  threshold_db: 12.0
+  # Re-arm below this SNR so a decaying double hit cannot retrigger, in dB.
+  rearm_db: 6.0
+  # Minimum hop RMS that can trigger an onset, in dBFS.
+  min_dbfs: -55.0
+  # Minimum interval between onsets, in seconds.
+  refractory_s: 0.12
+  # Rolling noise-floor history duration, in seconds.
+  floor_window_s: 3.0
+  # Percentile of eligible hop levels used for the noise floor.
+  floor_percentile: 20.0
+  # Time after each onset excluded from noise-floor estimation, in seconds.
+  floor_exclude_s: 0.3
+  # Noise-floor estimate before eligible audio history is available, in dBFS.
+  initial_floor_dbfs: -50.0
+classifier:
+  # Classifier registry name; none passes every detected transient through.
+  name: none
+  # Minimum classifier score accepted as a knock.
+  threshold: 0.5
+# Reserved for P03's deterministic challenge-response engine.
+dialog: {}
+# Reserved for P03's voice and knocker configuration.
+prompter: {}
+# Reserved for P04's dashboard server configuration.
+server: {}

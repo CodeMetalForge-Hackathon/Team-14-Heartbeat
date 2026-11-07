@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runs/
+data/raw/
+data/clips/
+models/*.tflite
+.DS_Store
+dist/

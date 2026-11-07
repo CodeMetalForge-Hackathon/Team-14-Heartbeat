@@ -1,0 +1,34 @@
+[project]
+name = "heartbeat"
+version = "0.1.0"
+description = "Contact-audio sentinel for finding people trapped under rubble"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "Apache-2.0"
+dependencies = [
+    "numpy",
+    "scipy",
+    "sounddevice",
+    "soundfile",
+    "pyyaml",
+    "pyserial",
+]
+
+[project.scripts]
+hb = "heartbeat.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "heartbeat"
+source-include = ["profiles/rubble.yaml"]
+data = { data = "profiles" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
