@@ -13,7 +13,7 @@ def test_named_profile_and_reserved_sections():
     assert profile.onset.threshold_db == 12
     assert profile.classifier.name == "auto"
     assert 0 <= profile.classifier.threshold <= 1
-    assert profile.dialog["first_pattern"] == 3 and profile.prompter["gate_tail_s"] == 0.6 and profile.server == {}
+    assert profile.dialog["first_pattern"] == 3 and profile.prompter["gate_tail_s"] == 0.6 and profile.server["port"] == 8000
 
 
 def test_custom_profile_inherits_and_preserves_future_sections(tmp_path):

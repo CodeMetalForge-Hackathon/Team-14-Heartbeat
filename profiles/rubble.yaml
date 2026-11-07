@@ -369,5 +369,54 @@ prompter:
   sim_noise_gain_db: -12.0
   # Repeating distractor sequence when simulation noise is enabled.
   sim_noise_kinds: [footstep, speech_like, drop]
-# Reserved for P04's dashboard server configuration.
-server: {}
+server:
+  # Network interface used by the dashboard server.
+  host: 0.0.0.0
+  # TCP port used by the dashboard server.
+  port: 8000
+  # Human-readable sentinel identifier displayed at the command post.
+  sentinel_name: Heartbeat
+  # Parent directory for timestamped black-box recordings.
+  runs_dir: runs
+  # Number of live events retained for reconnecting clients.
+  event_history: 2000
+  # Maximum pending events per WebSocket client before old events are dropped.
+  client_queue: 256
+  # Maximum events waiting to cross from producer threads into asyncio.
+  bridge_queue_events: 4096
+  # Maximum wait for a processing-thread state or command result, in seconds.
+  request_timeout_s: 2.0
+  # Default number of events returned by one history request.
+  events_default_limit: 200
+  # Maximum number of events returned by one history request.
+  events_max_limit: 1000
+  # Keep dashboard simulations interactive after the interview, in stream seconds.
+  dashboard_sim_duration_s: 600.0
+  blackbox:
+    # Maximum pending event/audio records before an explicit integrity failure.
+    queue_size: 8192
+    # Minimum stream-time spacing between saved level events, in seconds.
+    level_interval_s: 1.0
+    # Maximum raw-audio interval between header/data flushes, in seconds.
+    raw_flush_s: 1.0
+    # Timestamp tolerance when matching replay sounds to recorded onsets, in seconds.
+    replay_tolerance_s: 0.03
+    # Maximum wait for optional Git metadata collection, in seconds.
+    git_timeout_s: 2.0
+  dashboard:
+    # Width of the live audio history, in stream seconds.
+    trace_seconds: 20.0
+    # Maximum number of recent activity events shown in the browser.
+    event_log_limit: 50
+    # Delay before reconnecting a disconnected dashboard, in milliseconds.
+    reconnect_ms: 1500
+    # Interval between state refreshes, in milliseconds.
+    state_refresh_ms: 1000
+    # Lower bound of the live audio plot, in dBFS.
+    trace_min_dbfs: -80.0
+    # Upper bound of the live audio plot, in dBFS.
+    trace_max_dbfs: 0.0
+    # Vertical plot-grid spacing, in dB.
+    trace_grid_db: 20.0
+    # Horizontal plot-grid spacing, in seconds.
+    trace_grid_s: 5.0

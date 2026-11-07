@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 import heapq
 import math
+from pathlib import Path
 import time
 from typing import Any
 
@@ -27,6 +28,7 @@ class Pipeline:
         self.bus = bus
         self.profile = profile
         self.on_block: list[Callable[[float], Any]] = []
+        self.on_audio: list[Callable[[Any], Any]] = []
         self.on_sound: list[Callable[[Any], Any]] = []
         self.on_end: list[Callable[[float], Any]] = []
         self.t = 0.0
@@ -57,6 +59,10 @@ class Pipeline:
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def finished(self) -> bool:
+        return self._finished.is_set()
 
     def start(self) -> Pipeline:
         if self._thread is not None:
@@ -149,6 +155,7 @@ class Pipeline:
                 # Stay on the integer sample lattice rather than accumulating
                 # rounding error by adding floating-point hop durations.
                 self.t = (round(block.t0 * sample_rate) + len(block.x)) / sample_rate
+                self._call_hooks(self.on_audio, block, "on_audio")
                 try:
                     onsets = self.detector.process(block)
                 except Exception as exc:
@@ -240,13 +247,37 @@ class DialogSession:
         self.pipeline.call_soon(lambda: self._command(name, args))
 
     def _command(self, name: str, args: dict) -> None:
+        self._execute_command(name, args)
+
+    def command_result(self, name: str, **args) -> dict:
+        """Execute on the processing thread and return a JSON-friendly result."""
+        actions, errors = self._execute_command(name, args)
+        result = {"ok": not errors, "actions": self._describe(actions), "state": self.engine.snapshot()}
+        if errors:
+            result["error"] = str(errors[0])
+        return result
+
+    def _execute_command(self, name: str, args: dict):
         self._initialize()
-        if name == "reset" and not args:
+        errors = []
+        processing_thread = threading.get_ident()
+
+        def capture(event):
+            if event.type == "error" and threading.get_ident() == processing_thread:
+                errors.append(event.data.get("message", "command rejected"))
+
+        unsubscribe = self.pipeline.bus.subscribe(capture)
+        try:
+            actions = self.engine.command(name, self.pipeline.t, **args)
+        finally:
+            unsubscribe()
+        if name == "reset" and not errors:
             self._generation += 1
             self._waiting.clear()
-        self._actions(self.engine.command(name, self.pipeline.t, **args))
+        self._actions(actions)
         if self._active is not None:
             self.engine.gate_until(math.inf)
+        return actions, errors
 
     def _sound(self, det) -> None:
         self._actions(self.engine.on_sound(det))
@@ -279,6 +310,9 @@ class DialogSession:
         # EOF flush has now delivered every remaining onset, so the watermark
         # can reach the actual final sample without discarding late answers.
         self._actions(self.engine.tick(t))
+        snapshot = getattr(self.engine, "snapshot", None)
+        if callable(snapshot):
+            self.pipeline.bus.publish("state", t, **snapshot())
 
     @staticmethod
     def _describe(actions) -> list[dict]:
@@ -466,15 +500,131 @@ class SimulationResult:
     events: list
     t: float
     confirmed_t: float | None
+    run_dir: Path | None = None
 
 
-def run_simulation(profile=None, *, people=2, can_move="yes", hurt="yes",
-                   no_survivor=False, noise=False, realtime=False, seed=1,
-                   bus=None, duration_s=None) -> SimulationResult:
+class SessionRuntime:
+    """Own a sentinel's workers and finish its recording when audio ends.
+
+    Starting is quick enough for an ASGI startup callback. A completion watcher
+    drains prompt cleanup and the black box independently of the web event loop,
+    allowing the dashboard to keep serving the finished session.
+    """
+
+    def __init__(self, pipeline, session, events, blackbox=None, unsubscribe=None, run_dir=None):
+        self.pipeline = pipeline
+        self.session = session
+        self.bus = pipeline.bus
+        self.profile = pipeline.profile
+        self.events = events
+        self.blackbox = blackbox
+        self.run_dir = None if run_dir is None else Path(run_dir)
+        self._unsubscribe = unsubscribe
+        self._started = False
+        self._closed = threading.Event()
+        self._cleanup_lock = threading.Lock()
+
+    def start(self):
+        if self._started:
+            return self
+        self.pipeline.start()
+        self._started = True
+        threading.Thread(target=self._finish_when_done, name="heartbeat-session", daemon=True).start()
+        return self
+
+    def _finish_when_done(self):
+        try:
+            self.pipeline.join()
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        with self._cleanup_lock:
+            if self._closed.is_set():
+                return
+            try:
+                self.session.close()
+            finally:
+                try:
+                    if self.blackbox is not None:
+                        self.blackbox.close()
+                finally:
+                    if self._unsubscribe is not None:
+                        self._unsubscribe()
+                    self._closed.set()
+
+    def close(self):
+        if self._started:
+            self.pipeline.stop()
+            self.pipeline.join()
+        else:
+            self.pipeline.stop()
+        self._cleanup()
+
+    def run(self):
+        try:
+            self.start()
+            self._closed.wait()
+        except KeyboardInterrupt:
+            self.close()
+        return self.result()
+
+    def result(self) -> SimulationResult:
+        if self.session.engine is None:
+            raise RuntimeError("session has not processed audio")
+        confirmed = [event.t for event in self.events
+                     if event.type == "state" and event.data.get("status") == "CONFIRMED"]
+        return SimulationResult(self.session.engine.snapshot(), self.events, self.pipeline.t,
+                                min(confirmed) if confirmed else None, self.run_dir)
+
+
+def prepare_runtime(profile, source_factory, prompter_factory, *, bus=None,
+                    run_dir=None, argv=None, rng_seed=1, stop_when_finished=False,
+                    collect_events=False):
+    """Attach recording before constructors can emit their first events."""
     from .classify import make_classifier
-    from .config import load_profile
     from .events import EventBus
     from .onset import OnsetDetector
+
+    bus = EventBus() if bus is None else bus
+    blackbox = unsubscribe = source = prompter = None
+    events = []
+    try:
+        if run_dir is not None:
+            from .blackbox import BlackBox
+
+            blackbox = BlackBox(run_dir, profile, [] if argv is None else argv, bus=bus)
+            unsubscribe = bus.subscribe(blackbox)
+        if collect_events:
+            bus.subscribe(events.append)
+        source = source_factory()
+        pipeline = Pipeline(source, OnsetDetector(profile.onset), make_classifier(profile, bus=bus), bus, profile)
+        if blackbox is not None:
+            pipeline.on_audio.append(blackbox.on_audio)
+        prompter = prompter_factory(pipeline)
+        session = DialogSession(
+            pipeline, prompter, rng_seed=rng_seed,
+            schedule=getattr(source, "schedule", None), stop_when_finished=stop_when_finished,
+        )
+        return SessionRuntime(pipeline, session, events, blackbox, unsubscribe, run_dir)
+    except Exception as exc:
+        bus.publish("error", 0.0, where="session.setup", message=str(exc))
+        for resource in (prompter, source, blackbox):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+        if unsubscribe is not None:
+            unsubscribe()
+        raise
+
+
+def prepare_simulation(profile=None, *, people=2, can_move="yes", hurt="yes",
+                       no_survivor=False, noise=False, realtime=False, seed=1,
+                       bus=None, duration_s=None, run_dir=None, argv=None,
+                       stop_when_finished=None) -> SessionRuntime:
+    from .config import load_profile
     from .prompter import FakePrompter
 
     profile = load_profile() if profile is None else profile
@@ -482,27 +632,31 @@ def run_simulation(profile=None, *, people=2, can_move="yes", hurt="yes",
     if duration_s is None:
         key = "sim_no_survivor_duration_s" if no_survivor else "sim_duration_s"
         duration_s = profile.prompter[key]
-    bus = EventBus() if bus is None else bus
-    events = []
-    bus.subscribe(events.append)
-    source = SimulationSource(
-        profile, duration_s=duration_s, seed=seed, no_survivor=no_survivor,
-        noise=noise, realtime=realtime,
+    if stop_when_finished is None:
+        stop_when_finished = not no_survivor
+    return prepare_runtime(
+        profile,
+        lambda: SimulationSource(profile, duration_s=duration_s, seed=seed,
+                                 no_survivor=no_survivor, noise=noise, realtime=realtime),
+        lambda pipeline: FakePrompter(
+            pipeline.bus, cfg=profile.prompter, clock=lambda: pipeline.t, people=people,
+            can_move=can_move, hurt=hurt, no_survivor=no_survivor, seed=seed,
+        ),
+        bus=bus, run_dir=run_dir, argv=argv, rng_seed=seed,
+        stop_when_finished=stop_when_finished, collect_events=True,
     )
-    pipeline = Pipeline(source, OnsetDetector(profile.onset), make_classifier(profile, bus=bus), bus, profile)
-    prompter = FakePrompter(
-        bus, cfg=profile.prompter, clock=lambda: pipeline.t, people=people,
-        can_move=can_move, hurt=hurt, no_survivor=no_survivor, seed=seed,
-    )
-    session = DialogSession(
-        pipeline, prompter, rng_seed=seed, schedule=source.schedule,
-        stop_when_finished=not no_survivor,
+
+
+def run_simulation(profile=None, *, people=2, can_move="yes", hurt="yes",
+                   no_survivor=False, noise=False, realtime=False, seed=1,
+                   bus=None, duration_s=None, run_dir=None, argv=None) -> SimulationResult:
+    """Run headlessly; recording is opt-in here and enabled by default by CLI."""
+    runtime = prepare_simulation(
+        profile, people=people, can_move=can_move, hurt=hurt, no_survivor=no_survivor,
+        noise=noise, realtime=realtime, seed=seed, bus=bus, duration_s=duration_s,
+        run_dir=run_dir, argv=argv,
     )
     try:
-        pipeline.run()
+        return runtime.run()
     finally:
-        session.close()
-    confirmed = [event.t for event in events
-                 if event.type == "state" and event.data.get("status") == "CONFIRMED"]
-    return SimulationResult(session.engine.snapshot(), events, pipeline.t,
-                            min(confirmed) if confirmed else None)
+        runtime.close()

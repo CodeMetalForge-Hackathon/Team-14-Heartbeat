@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from dataclasses import replace
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -20,7 +22,7 @@ from .classify import make_classifier
 from .config import load_profile
 from .events import EventBus
 from .onset import OnsetDetector
-from .runner import DialogSession, Pipeline, run_simulation
+from .runner import Pipeline, prepare_runtime, prepare_simulation, run_simulation
 from .synth import scene
 
 
@@ -79,6 +81,19 @@ def _parser() -> argparse.ArgumentParser:
     sim.add_argument("--realtime", action="store_true")
     sim.add_argument("--seed", type=int, default=1)
     sim.add_argument("--profile", default="rubble")
+    for command in (run, sim):
+        command.add_argument("--dashboard", action="store_true", help="serve the local command-post dashboard")
+        command.add_argument("--host", help="dashboard host; defaults to the profile")
+        command.add_argument("--port", type=int, help="dashboard port; defaults to the profile")
+        command.add_argument("--run-dir", type=Path, help="recording directory; defaults to a new runs/timestamp")
+    verify = commands.add_parser("verify", help="check event-chain and audio-clip integrity")
+    verify.add_argument("run_dir", type=Path)
+    replay = commands.add_parser("replay", help="compare offline detections with a recorded session")
+    replay.add_argument("source", type=Path)
+    replay.add_argument("--profile")
+    replay.add_argument("--classifier")
+    report = commands.add_parser("report", help="write a session after-action report")
+    report.add_argument("run_dir", type=Path)
     return parser
 
 
@@ -307,6 +322,43 @@ def _operator_input(session, pipeline) -> None:
         return
 
 
+def _run_directory(args, profile) -> Path:
+    explicit = getattr(args, "run_dir", None)
+    if explicit is not None:
+        path = Path(explicit)
+    else:
+        root = Path(profile.server["runs_dir"])
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        number = 1
+        while True:
+            path = root / (stamp if number == 1 else f"{stamp}-{number:02d}")
+            try:
+                path.mkdir()
+                break
+            except FileExistsError:
+                number += 1
+    print(f"Black box: {path}", flush=True)
+    return path
+
+
+
+def _serve(runtime, args, profile) -> None:
+    from .server import create_app, run_server
+
+    try:
+        app = create_app(
+            runtime.pipeline, runtime.session, runtime.bus, cfg=profile.server,
+            run_id=runtime.run_dir.name, profile=profile,
+            blackbox=runtime.blackbox, on_start=runtime.start,
+            on_stop=lambda: asyncio.to_thread(runtime.close),
+        )
+        run_server(app, host=args.host, port=args.port)
+    finally:
+        runtime.close()
+
+
+
 def _run(args, profile, bus) -> int:
     from .prompter import make_prompter
 
@@ -317,25 +369,29 @@ def _run(args, profile, bus) -> int:
     bus.subscribe(lambda event: errors.append(event)
                   if event.type == "error" and event.data.get("severity") != "warning" else None)
     cfg = profile.audio
-    source = (WavSource(args.wav, realtime=True, block=cfg.block) if args.wav is not None
-              else MicSource(args.device, block=cfg.block, bus=bus, cfg=cfg))
-    classifier = make_classifier(profile, bus=bus)
-    if type(classifier).__name__ == "PassThroughClassifier":
+    runtime = prepare_runtime(
+        profile,
+        lambda: (WavSource(args.wav, realtime=True, block=cfg.block) if args.wav is not None
+                 else MicSource(args.device, block=cfg.block, bus=bus, cfg=cfg)),
+        lambda pipeline: make_prompter(
+            args.knocker, bus, cfg=profile.prompter, clock=lambda: pipeline.t,
+            speaker_device=args.speaker_device,
+        ),
+        bus=bus, run_dir=_run_directory(args, profile), argv=getattr(args, "_argv", sys.argv),
+    )
+    if type(runtime.pipeline.classifier).__name__ == "PassThroughClassifier":
         print("Warning: passthrough classifier counts every transient; use the challenge results.",
               file=sys.stderr)
-    pipeline = Pipeline(source, OnsetDetector(profile.onset), classifier, bus, profile)
-    prompter = make_prompter(
-        args.knocker, bus, cfg=profile.prompter, clock=lambda: pipeline.t,
-        speaker_device=args.speaker_device,
-    )
-    session = DialogSession(pipeline, prompter)
     print("Keys then Enter: c challenge, i interview, r reset, a approve, q quit.", flush=True)
-    threading.Thread(target=_operator_input, args=(session, pipeline), daemon=True,
+    threading.Thread(target=_operator_input, args=(runtime.session, runtime.pipeline), daemon=True,
                      name="heartbeat-stdin").start()
     try:
-        pipeline.run()
+        if args.dashboard:
+            _serve(runtime, args, profile)
+        else:
+            runtime.run()
     finally:
-        session.close()
+        runtime.close()
     return 1 if errors else 0
 
 
@@ -343,11 +399,21 @@ def _sim(args, profile, bus) -> int:
     if args.people < 0:
         raise ValueError("people must be nonnegative")
     bus.subscribe(_DialogConsole())
-    result = run_simulation(
-        profile, people=args.people, can_move=args.can_move, hurt=args.hurt,
-        no_survivor=args.no_survivor, noise=args.noise,
-        realtime=args.realtime, seed=args.seed, bus=bus,
+    options = dict(
+        people=args.people, can_move=args.can_move, hurt=args.hurt,
+        no_survivor=args.no_survivor, noise=args.noise, realtime=args.realtime,
+        seed=args.seed, bus=bus, run_dir=_run_directory(args, profile),
+        argv=getattr(args, "_argv", sys.argv),
     )
+    if args.dashboard:
+        runtime = prepare_simulation(
+            profile, **options, duration_s=profile.server["dashboard_sim_duration_s"],
+            stop_when_finished=False,
+        )
+        _serve(runtime, args, profile)
+        result = runtime.result()
+    else:
+        result = run_simulation(profile, **options)
     snap = result.snapshot
     answers = snap["answers"]
     print(f"Simulation ended at {result.t:.2f}s: {snap['status']} ({snap['state']}), {snap['odds']}.")
@@ -364,11 +430,29 @@ def _sim(args, profile, bus) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    args._argv = list(sys.argv if argv is None else ["hb", *argv])
     bus = EventBus()
     bus.subscribe(_print_error)
     try:
         if args.command == "devices":
             return _devices(bus)
+        if args.command == "verify":
+            from .blackbox import verify_run
+
+            result = verify_run(args.run_dir)
+            print(result)
+            return 0 if result.ok else 1
+        if args.command == "report":
+            from .blackbox import report_run
+
+            print(report_run(args.run_dir))
+            return 0
+        if args.command == "replay":
+            from .blackbox import replay_run
+
+            result = replay_run(args.source, profile=args.profile, classifier=args.classifier)
+            print(f"matched {result['matched']}, missing {result['missing']}, new {result['new']}")
+            return 0
         profile = load_profile(args.profile)
         if args.command == "listen":
             return _listen(args, profile, bus)

@@ -103,6 +103,7 @@ def test_record_partial_audio_survives_reported_device_failure(fake_recording, c
 
 
 def test_devices_uses_inventory_without_opening_input(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [], raising=False)
     monkeypatch.setattr(cli, "list_devices", lambda **kwargs: [{
         "index": 4, "name": "Test input", "max_input_channels": 1,
         "max_output_channels": 0, "is_default_input": True,
@@ -114,6 +115,7 @@ def test_devices_uses_inventory_without_opening_input(monkeypatch, capsys):
 
 
 def test_device_query_failure_is_an_error_event(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "find_stick_ports", lambda **kwargs: [], raising=False)
     def unavailable(*, bus):
         bus.publish("error", 0.0, message="audio backend unavailable")
         return []

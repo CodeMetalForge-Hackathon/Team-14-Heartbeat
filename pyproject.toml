@@ -12,6 +12,9 @@ dependencies = [
     "soundfile",
     "pyyaml",
     "pyserial",
+    "fastapi",
+    "uvicorn",
+    "websockets",
 ]
 
 [project.scripts]
@@ -21,7 +24,7 @@ hb = "heartbeat.cli:main"
 ml = ["ai-edge-litert", "scikit-learn", "joblib"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "httpx"]
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
