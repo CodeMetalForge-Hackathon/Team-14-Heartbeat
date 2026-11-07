@@ -41,6 +41,15 @@ class DialogConfig:
     interval_s: float
     window_s: float
     early_close_s: float
+    require_silence_after: bool
+    response_start_max_s: float
+    pre_listen_s: float
+    max_pre_knocks: int
+    mu_max: float
+    noisy_retry_s: float
+    max_noisy_tries: int
+    reject_bounce: bool
+    bounce_gap_ratio: float
     min_matched_rounds: int
     p_confirm: float
     max_rounds: int
@@ -68,16 +77,21 @@ class DialogConfig:
             raise ValueError(f"Missing dialog keys: {', '.join(sorted(missing))}")
         result = cls(**deepcopy(dict(raw)))
         for name in ("rate_window_s", "prior_s", "burst_window_s", "interval_s", "window_s",
-                     "early_close_s", "question_window_s", "question_early_close_s"):
+                     "early_close_s", "question_window_s", "question_early_close_s",
+                     "response_start_max_s", "pre_listen_s", "mu_max", "noisy_retry_s",
+                     "bounce_gap_ratio"):
             result._number(name, positive=True)
         for name in ("prior_events", "lambda_floor", "quiet_s", "cooldown_s"):
             result._number(name)
-        for name in ("burst_knocks", "first_pattern", "min_matched_rounds", "max_rounds", "max_empty_windows"):
+        for name in ("burst_knocks", "first_pattern", "min_matched_rounds", "max_rounds",
+                     "max_empty_windows", "max_pre_knocks", "max_noisy_tries"):
             result._number(name, positive=True, integer=True)
         result._number("p_confirm", positive=True)
         if result.p_confirm > 1:
             raise ValueError("dialog.p_confirm must be at most one")
-        for name in ("auto_challenge", "auto_interview"):
+        if result.bounce_gap_ratio >= 1:
+            raise ValueError("dialog.bounce_gap_ratio must be below one")
+        for name in ("auto_challenge", "auto_interview", "require_silence_after", "reject_bounce"):
             if not isinstance(getattr(result, name), bool):
                 raise ValueError(f"dialog.{name} must be boolean")
         if (not isinstance(result.patterns, list) or len(set(result.patterns)) < 2
@@ -135,12 +149,12 @@ class DialogEngine:
         self._clock = 0.0
         self._epoch_t = 0.0
         self._gate_until = 0.0
+        cfg = self.cfg
+        self.background = BackgroundRate(cfg.rate_window_s, cfg.prior_events, cfg.prior_s, cfg.lambda_floor)
         self._initialize()
         self._emit_state(0.0)
 
     def _initialize(self):
-        cfg = self.cfg
-        self.background = BackgroundRate(cfg.rate_window_s, cfg.prior_events, cfg.prior_s, cfg.lambda_floor)
         self.state, self.status = "LISTENING", "NO_SIGNS"
         self._state_since = self._clock
         self.round = 0
@@ -160,6 +174,12 @@ class DialogEngine:
         self._resume_state = None
         self._questions: list[str] = []
         self._question = None
+        self._pre_started = None
+        self._pre_times: list[float] = []
+        self._retry_at = None
+        self._noisy_tries = 0
+        self._noisy = False
+        self._lambda_used = self.background.lambda_per_s
 
     def snapshot(self) -> dict:
         return {
@@ -168,6 +188,8 @@ class DialogEngine:
             "combined_p": self.combined_p, "odds": format_odds(self.combined_p),
             "answers": dict(self.answers), "approved": self.approved,
             "lambda_per_min": self.background.lambda_per_s * 60,
+            "lambda_used_per_min": self._lambda_used * 60,
+            "mu": self._lambda_used * self.cfg.window_s, "noisy": self._noisy,
             "profile": self.cfg.profile,
         }
 
@@ -181,7 +203,7 @@ class DialogEngine:
     def _advance(self, t):
         if t < self._clock:
             return
-        if self.state == "LISTENING":
+        if self._window is None and not self._awaiting_prompts:
             start = max(self._clock, self._gate_until)
             if start <= t:
                 self.background.observe(start, t)
@@ -189,7 +211,10 @@ class DialogEngine:
         self._clock = t
 
     def _emit_state(self, t):
-        self._emit("state", float(t), self.snapshot())
+        data = self.snapshot()
+        if self.state == "TOO_NOISY":
+            data["text"] = "Too noisy: call for quiet."
+        self._emit("state", float(t), data)
 
     def _transition(self, state, t, *, status=None):
         changed = state != self.state or (status is not None and status != self.status)
@@ -226,7 +251,11 @@ class DialogEngine:
         if not det.is_knock or det.gated:
             return actions
         self.background.add(t)
-        if self._window is not None and self._window.opened <= t <= self._window.deadline:
+        if t < self._gate_until:
+            return actions
+        if self.state == "PRE_LISTEN" and self._pre_started <= t:
+            self._pre_times.append(t)
+        elif self._window is not None and self._window.opened <= t <= self._window.deadline:
             self._window.times.append(t)
             self._window.times.sort()
         elif self.state == "LISTENING" and t >= self._state_since and t >= self._gate_until:
@@ -246,19 +275,29 @@ class DialogEngine:
             close = self._close_at()
             self._advance(close)
             actions = self._finish_window(close)
-            self._advance(t)
-            return actions
+            if actions:
+                self._advance(t)
+                return actions
         if self.state == "NO_RESPONSE" and t >= self._cooldown_until:
             end = self._cooldown_until
             self._advance(end)
             self._transition("LISTENING", end)
+        if self.state == "TOO_NOISY" and t >= self._retry_at:
+            retry = self._retry_at
+            self._advance(retry)
+            self._next_round(retry)
         if (self.state == "LISTENING" and self.cfg.auto_challenge and self._burst_ready
                 and self._last_passive_knock is not None and t >= self._last_passive_knock + self.cfg.quiet_s):
             start = max(self._clock, self._last_passive_knock + self.cfg.quiet_s)
             self._advance(start)
-            actions = self._start_challenge(start)
-            self._advance(t)
-            return actions
+            self._start_challenge(start)
+        if self.state == "PRE_LISTEN":
+            end = max(self._pre_started, self._gate_until) + self.cfg.pre_listen_s
+            if t >= end:
+                self._advance(end)
+                actions = self._finish_pre_listen(end)
+                self._advance(t)
+                return actions
         self._advance(t)
         return []
 
@@ -295,11 +334,33 @@ class DialogEngine:
         self.round, self.rounds, self.combined_p = 0, [], 1.0
         self._expected = None
         self._empty_windows = 0
+        self._noisy_tries = 0
         self.approved = False
         self._burst, self._burst_ready = [], False
         return self._next_round(t)
 
     def _next_round(self, t):
+        self._pre_started = float(t)
+        self._pre_times = []
+        self._transition("PRE_LISTEN", t)
+        return []
+
+    def _finish_pre_listen(self, t):
+        start = t - self.cfg.pre_listen_s
+        pre_count = sum(start <= knock <= t for knock in self._pre_times)
+        self._lambda_used = max(self.background.lambda_per_s,
+                                pre_count / self.cfg.pre_listen_s, self.cfg.lambda_floor)
+        self._noisy = pre_count >= self.cfg.max_pre_knocks or self._lambda_used * self.cfg.window_s > self.cfg.mu_max
+        if self._noisy:
+            self._noisy_tries += 1
+            if self._noisy_tries >= self.cfg.max_noisy_tries:
+                self._cooldown_until = t + self.cfg.cooldown_s
+                self._transition("NO_RESPONSE", t)
+            else:
+                self._retry_at = t + self.cfg.noisy_retry_s
+                self._transition("TOO_NOISY", t)
+            return []
+        self._noisy_tries = 0
         first = self.round == 0
         choices = [k for k in self.cfg.patterns if k != self._expected]
         self._expected = self.cfg.first_pattern if first else self._rng.choice(choices)
@@ -328,12 +389,23 @@ class DialogEngine:
             return []
 
         heard = len(window.times)
-        p = round_p(self._expected, heard, self.cfg.window_s, self.background.lambda_per_s)
-        matched = p is not None
+        p = round_p(self._expected, heard, self.cfg.window_s, self._lambda_used)
+        closed_early = bool(window.times) and t < window.deadline
+        self._noisy = bool(window.times) and self.cfg.require_silence_after and not closed_early
+        starts_promptly = bool(window.times) and window.times[0] - window.opened <= self.cfg.response_start_max_s
+        gaps = [right - left for left, right in zip(window.times, window.times[1:])]
+        bounce = (self.cfg.reject_bounce and len(gaps) >= 2
+                  and all(right < left * self.cfg.bounce_gap_ratio for left, right in zip(gaps, gaps[1:])))
+        matched = (p is not None and not self._noisy and starts_promptly and not bounce
+                   and self._lambda_used * self.cfg.window_s <= self.cfg.mu_max)
         previous = [record["p"] for record in self.rounds if record["matched"]]
         self.combined_p = combine(previous + ([p] if matched else []))
         record = {"round": self.round, "expected": self._expected, "heard": heard,
                   "knock_times": list(window.times), "p": p, "matched": matched,
+                  "noisy": self._noisy, "closed_early": closed_early,
+                  "starts_promptly": starts_promptly, "bounce": bounce,
+                  "lambda_used_per_min": self._lambda_used * 60,
+                  "mu": self._lambda_used * self.cfg.window_s,
                   "combined_p": self.combined_p, "odds": format_odds(self.combined_p)}
         self.rounds.append(record)
         self._emit("round_result", t, deepcopy(record))

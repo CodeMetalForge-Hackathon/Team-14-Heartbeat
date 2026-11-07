@@ -16,7 +16,7 @@ from time import perf_counter
 import numpy as np
 
 from ..classify import Detection
-from .features import extract_features, feature_names, settings
+from .features import FEATURE_SPEC_VERSION, extract_features, feature_names, settings
 
 
 ARTIFACT_VERSION = 1
@@ -42,7 +42,7 @@ class FeatureExtractor:
             from .yamnet import YamnetClassifier
             self.yamnet = YamnetClassifier(cfg)
         self.spec = {
-            "version": ARTIFACT_VERSION,
+            "version": FEATURE_SPEC_VERSION,
             "mode": mode,
             "sample_rate": SAMPLE_RATE,
             "clip_samples": CLIP_SAMPLES,
@@ -159,6 +159,9 @@ class HeadClassifier:
         self.cfg = cfg
         self.artifact = load_head(cfg.head_path)
         saved_spec = self.artifact["feature_spec"]
+        if saved_spec.get("version") != FEATURE_SPEC_VERSION:
+            raise ValueError(f"head feature spec version {saved_spec.get('version')!r} "
+                             f"differs from current version {FEATURE_SPEC_VERSION}; retrain")
         self.extractor = FeatureExtractor(cfg, mode=saved_spec.get("mode"), yamnet=yamnet)
         if _canonical(self.extractor.spec) != _canonical(saved_spec):
             raise ValueError("head feature spec differs from current DSP/YAMNet configuration; retrain")

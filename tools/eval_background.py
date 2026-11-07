@@ -87,7 +87,9 @@ def simulate_dialog_events(detections, duration_s: float, cfg, *, emit=None) -> 
                 last_action_t = float(t)
             if state == "NO_RESPONSE":
                 cooldown_end = float(t) + cfg.dialog["cooldown_s"]
-            elif state == "LISTENING":
+            else:
+                # An operator may start PRE_LISTEN during NO_RESPONSE's
+                # cooldown. Do not retain that obsolete virtual deadline.
                 cooldown_end = None
         elif kind == "window_open":
             window = dict(data, last=None)
@@ -161,8 +163,12 @@ def simulate_dialog_events(detections, duration_s: float, cfg, *, emit=None) -> 
                 window = None
                 cooldown_end = None
                 rearmed += 1
+            previous_state = engine.snapshot()["state"]
             actions = engine.command("challenge", t)
-            started += bool(actions)
+            # A noise-guarded challenge first enters passive PRE_LISTEN and
+            # returns no actions. Its prompt batch is emitted by a later tick.
+            started += bool(actions) or (previous_state in {"LISTENING", "NO_RESPONSE"}
+                                        and engine.snapshot()["state"] == "PRE_LISTEN")
             dispatch(actions, t)
             challenge_index += 1
         while current is not None and float(current.t) == t:
@@ -272,7 +278,8 @@ def write_report(result: dict, output_dir: str | Path) -> Path:
         report += (
             f"The actual P03 DialogEngine was challenged every {result['challenge_interval_s']:g} s, "
             f"starting at t=0: {result['challenge_attempts']} attempts, {result['challenges_started']} "
-            f"started, {result['challenges_rejected']} rejected while busy. "
+            f"accepted, {result['challenges_rejected']} rejected while busy. "
+            "Accepted challenges include passive pre-listening; noise guards may block all prompts. "
             f"FakePrompter(no_survivor=True) scheduled {result['prompt_batches']} prompt batches "
             "with their actual virtual durations and injected no answers. Prompt completion, "
             "inclusive gate tails, audio onsets, and response deadlines were replayed in stream-time "

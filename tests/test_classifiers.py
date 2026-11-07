@@ -9,12 +9,13 @@ import numpy as np
 import pytest
 
 from heartbeat import synth
+from heartbeat.audio import AudioBlock
 from heartbeat.classify import make_classifier
-from heartbeat.classifiers.features import extract_features, feature_names
+from heartbeat.classifiers.features import extract_features, feature_names, feature_window
 from heartbeat.classifiers.heuristic import HeuristicClassifier
 from heartbeat.classifiers.yamnet import YamnetClassifier
 from heartbeat.config import load_profile
-from heartbeat.onset import CLIP_SAMPLES, PRE_SAMPLES, Onset
+from heartbeat.onset import CLIP_SAMPLES, PRE_SAMPLES, Onset, OnsetDetector
 
 
 def onset(sound, *, gated=False):
@@ -83,10 +84,10 @@ class FakeInterpreter:
 
 def test_features_are_finite_and_have_required_layout(cfg):
     names = feature_names(cfg)
-    assert len(names) == 39
+    assert len(names) == 40
     assert len([name for name in names if name.startswith("log_mel_")]) == 32
     values = extract_features(onset(synth.knock(seed=4)).clip, cfg)
-    assert values.shape == (39,)
+    assert values.shape == (40,)
     assert np.isfinite(values).all()
     assert values[0] >= 0 and values[1] >= 0
     assert 0 <= values[2] <= 8000
@@ -98,6 +99,130 @@ def test_features_are_finite_and_have_required_layout(cfg):
 def test_features_reject_invalid_audio(cfg, bad):
     with pytest.raises(ValueError):
         extract_features(bad, cfg)
+
+
+def test_features_ignore_later_audio_without_changing_original_clip(cfg):
+    original = onset(synth.knock(seed=4)).clip
+    changed = original.copy()
+    changed[PRE_SAMPLES + round(cfg.features["feature_post_s"] * 16000):] = 0.9
+    np.testing.assert_array_equal(extract_features(original, cfg), extract_features(changed, cfg))
+    assert len(changed) == CLIP_SAMPLES
+
+
+def test_feature_window_keeps_resonant_beating_in_one_impact(cfg):
+    expected = PRE_SAMPLES + round(cfg.features["feature_post_s"] * 16000)
+    for seed in range(32):
+        clip = onset(synth.knock(seed=seed)).clip
+        assert len(feature_window(clip, cfg)) == expected
+
+
+def test_feature_window_stops_before_a_second_impact(cfg):
+    clip = onset(synth.knock(duration_s=0.08, seed=4)).clip
+    second = PRE_SAMPLES + round(0.16 * 16000)
+    sound = synth.clap(seed=2)
+    clip[second:second + len(sound)] += sound
+    original = clip.copy()
+    selected = feature_window(clip, cfg)
+    assert PRE_SAMPLES + round(0.08 * 16000) < len(selected) < second
+    np.testing.assert_array_equal(selected, clip[:len(selected)])
+    np.testing.assert_array_equal(clip, original)
+
+
+def _three_knock_onsets(spacing, *, seeds=range(6), varied=False):
+    """Real detector clips include following knocks, pre-roll and noise."""
+    profile = load_profile()
+    result = []
+    for seed in seeds:
+        rng = np.random.default_rng(1000 + seed)
+        events = [(0.6 + i * spacing, "knock", float(rng.uniform(-9, -1)) if varied else -6)
+                  for i in range(3)]
+        audio, _ = synth.scene(events[-1][0] + 1.1, events,
+                               bg_dbfs=float(rng.uniform(-60, -40)) if varied else -50,
+                               seed=seed, cfg=profile.audio.synth)
+        detector = OnsetDetector(profile)
+        onsets = []
+        for index in range(0, len(audio), 256):
+            onsets.extend(detector.process(AudioBlock(index / 16000, audio[index:index + 256])))
+        onsets.extend(detector.flush())
+        assert len(onsets) == 3
+        result.extend(onsets)
+    return result
+
+
+@pytest.mark.parametrize("spacing", [0.3, 0.45, 0.6, 1.1])
+def test_heuristic_accepts_groups_at_human_spacing(cfg, spacing):
+    classifier = HeuristicClassifier(cfg)
+    for varied in (False, True):
+        onsets = _three_knock_onsets(spacing, varied=varied)
+        assert sum(classifier.classify(source).is_knock for source in onsets) / len(onsets) >= 0.95
+
+
+@pytest.mark.parametrize("spacing", [0.3, 0.45, 0.6, 1.1])
+def test_local_head_accepts_groups_at_human_spacing(cfg, spacing):
+    pytest.importorskip("sklearn")
+    pytest.importorskip("joblib")
+    from heartbeat.classifiers.head import HeadClassifier
+
+    if not Path(cfg.head_path).is_file() or not (Path(cfg.model_dir) / "yamnet.tflite").is_file():
+        pytest.skip("local head/YAMNet absent; tests never download models")
+    try:
+        classifier = HeadClassifier(cfg)
+    except RuntimeError as exc:
+        if "No CPU TFLite interpreter" in str(exc):
+            pytest.skip(str(exc))
+        raise
+    onsets = _three_knock_onsets(spacing)
+    assert sum(classifier.classify(source).is_knock for source in onsets) / len(onsets) >= 0.95
+
+
+def test_auto_warns_and_falls_back_from_old_feature_spec(tmp_path, cfg, caplog):
+    pytest.importorskip("sklearn")
+    pytest.importorskip("joblib")
+    from heartbeat.classifiers.head import feature_spec, save_head
+    from tools.train_head import fit_head
+
+    spec = feature_spec(cfg, mode="dsp")
+    spec["version"] = 1  # The previous full-clip DSP contract.
+    model = fit_head(np.random.default_rng(2).normal(size=(20, len(feature_names(cfg)))),
+                     np.tile([0, 1], 10), cfg)
+    path = tmp_path / "old.joblib"
+    save_head(path, model, spec, "a" * 64, 0.5)
+    classifier = make_classifier(replace(cfg, name="auto", head_path=str(path), model_dir=str(tmp_path)))
+    assert classifier.name == "heuristic"
+    assert "head feature spec version" in caplog.text
+    assert "retrain" in caplog.text
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("key", ["attack_max_s", "decay_max_s", "centroid_max_hz",
+                                "centroid_min_hz", "high_ratio_max", "peak_rms_min"])
+def test_heuristic_rejects_nonfinite_limits(cfg, key, value):
+    changed = replace(cfg, heuristic={**cfg.heuristic, key: value})
+    with pytest.raises(ValueError, match="finite"):
+        HeuristicClassifier(changed).classify(onset(synth.knock(seed=1)))
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -1])
+def test_heuristic_rejects_invalid_rule_weights(cfg, value):
+    changed = replace(cfg, heuristic={**cfg.heuristic,
+                                     "weights": {**cfg.heuristic["weights"], "attack": value}})
+    with pytest.raises(ValueError, match="weights"):
+        HeuristicClassifier(changed).classify(onset(synth.knock(seed=1)))
+
+
+def test_head_keeps_the_full_clip_for_yamnet(fake_model):
+    from heartbeat.classifiers.head import FeatureExtractor
+
+    fake = FakeInterpreter(embedding=False)
+    yamnet = YamnetClassifier(fake_model, interpreter=fake)
+    extractor = FeatureExtractor(fake_model, yamnet=yamnet)
+    clip = onset(synth.knock(seed=3)).clip
+    second = PRE_SAMPLES + round(0.45 * 16000)
+    sound = synth.knock(seed=8)
+    clip[second:second + len(sound)] += sound
+    extractor.transform(clip)
+    assert len(feature_window(clip, fake_model)) < len(clip)
+    np.testing.assert_array_equal(fake.input, clip)
 
 
 def test_heuristic_synthetic_auc_over_point_nine(cfg):
@@ -255,7 +380,7 @@ def test_head_scaling_limits_rare_scores_without_changing_dsp(cfg):
     rng = np.random.default_rng(42)
     # A sub-percent class-score change must not become an enormous z-score.
     scores = rng.uniform(0, 0.0002, (40, 521))
-    rest = rng.normal(size=(40, 41))  # Two embedding values plus 39 DSP features.
+    rest = rng.normal(size=(40, 2 + len(feature_names(cfg))))
     features = np.column_stack((scores, rest))
     model = fit_head(features, np.tile([0, 1], 20), cfg)
     scale = model.named_steps["scaler"].scale_
@@ -300,7 +425,7 @@ def test_head_trains_saves_loads_with_synthetic_clips(fake_model, tmp_path, embe
     assert report["missing_clips"] == 1
     assert len(artifact["training_data_hash"]) == 64
     assert artifact["feature_spec"]["yamnet"]["embedding"] == (1024 if embedding else 0)
-    assert artifact["pipeline"].n_features_in_ == 521 + 39 + (1024 if embedding else 0)
+    assert artifact["pipeline"].n_features_in_ == 521 + len(feature_names(cfg)) + (1024 if embedding else 0)
     assert artifact["pipeline"].named_steps["logistic"].class_weight == "balanced"
     assert np.all(artifact["pipeline"].named_steps["scaler"].scale_[:521] >= cfg.training["score_scale_floor"])
     assert report["final_calibration"]["false_positive_rate"] <= cfg.training["max_false_positive_rate"]
@@ -429,11 +554,12 @@ def test_background_dialog_counts_confirmations_and_prompt_tail():
     profile = replace(profile, dialog={**profile.dialog, "auto_challenge": False, "auto_interview": False,
                                       "first_pattern": 3, "patterns": [2, 3], "p_confirm": 0.0001})
     fake = FakePrompter(cfg=profile.prompter, no_survivor=True, seed=1)
-    first_end, replies = fake.schedule_batch([PromptVoice("copy_knocks"), PromptKnocks(3, profile.dialog["interval_s"])], 0)
+    first_end, replies = fake.schedule_batch([PromptVoice("copy_knocks"), PromptKnocks(3, profile.dialog["interval_s"])],
+                                             profile.dialog["pre_listen_s"])
     assert replies == []
     first_times = [first_end + offset for offset in (1, 1.5, 2)]
-    second_start = first_times[-1] + profile.dialog["early_close_s"]
-    second_end, _ = fake.schedule_batch([PromptVoice("copy_knocks"), PromptKnocks(2, profile.dialog["interval_s"])], second_start)
+    second_start = first_times[-1] + profile.dialog["early_close_s"] + profile.dialog["pre_listen_s"]
+    second_end, _ = fake.schedule_batch([PromptKnocks(2, profile.dialog["interval_s"])], second_start)
     times = sorted([first_end + profile.prompter["gate_tail_s"], *first_times, second_end + 1, second_end + 1.5])
     events = [Detection(t=t, peak=0.8, snr_db=30, gated=False,
                         clip=np.empty(0, dtype=np.float32), score=1.0, is_knock=True,

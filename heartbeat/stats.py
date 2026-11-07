@@ -5,9 +5,9 @@ only from passive listening. Correlated impacts, periodic machinery, changing
 noise, adaptive response windows and repeated trials violate that simplification.
 Multiplying round probabilities is useful evidence under the model; it is not a
 calibrated posterior probability of humanity or a session-wide false alarm rate.
-High background rate alone is not a veto: at one event per second and nominal
-six-second windows, exact counts 3, 2, 3, 4 have a product likelihood of about
-4.75e-5. Four such matches can satisfy the configured 1e-4 confirmation criterion.
+Likelihood alone cannot reject high-rate or correlated noise. DialogEngine also
+requires quiet pre-listening, bounded expected background counts, a prompt start
+and silence after an answer. The rate object survives operator dialog resets.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ class BackgroundRate:
     detections inside them, and ``advance(t)`` ages both out of the same real
     stream-time window. Inactive gaps never become quiet observation time.
     Retained intervals allow delayed detections from earlier passive listening.
+    Callers include every ungated interval outside response windows, including
+    cooldowns and interview gaps; a dialog reset does not reset this estimator.
     """
 
     def __init__(self, rate_window_s: float, prior_events: float, prior_s: float, lambda_floor: float):

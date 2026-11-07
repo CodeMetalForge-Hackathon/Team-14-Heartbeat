@@ -125,8 +125,8 @@ onset:
 classifier:
   # Prefer a trained head, then YAMNet, then the dependency-free heuristic.
   name: auto
-  # Synthetic-head calibration threshold; remeasure with real contact recordings.
-  threshold: 0.34562463893143186
+  # Synthetic sensitivity/FPR tradeoff; recalibrate with real contact recordings.
+  threshold: 0.3681996792882003
   # Display names whose largest YAMNet score is the zero-shot knock score.
   targets: [Knock, Tap, "Thump, thud"]
   # Directory containing yamnet.tflite and yamnet_class_map.csv.
@@ -136,6 +136,14 @@ classifier:
   # CPU inference threads; benchmark this on the target Raspberry Pi.
   num_threads: 2
   features:
+    # Maximum DSP analysis after the onset, in seconds; YAMNet keeps the full clip.
+    feature_post_s: 0.25
+    # Envelope rise above the decayed impact that marks another onset, in dB.
+    feature_next_rise_db: 8.0
+    # Earliest later impact to split from the initial onset, in seconds.
+    feature_next_min_s: 0.03
+    # Continuous decay-floor dwell required before a later rise can split, in seconds.
+    feature_next_quiet_s: 0.012
     # RMS envelope smoothing window, in seconds.
     envelope_s: 0.002
     # Fraction of peak envelope marking the start of the attack.
@@ -159,10 +167,10 @@ classifier:
     # Positive floor for logarithms and numerical divisions.
     log_floor: 1.0e-12
   heuristic:
-    # Longest attack receiving knock-like support, in seconds.
-    attack_max_s: 0.03
-    # Longest decay receiving knock-like support, in seconds.
-    decay_max_s: 0.25
+    # Longest short-window impulsive attack receiving full knock support, in seconds.
+    attack_max_s: 0.008
+    # Longest short-window decay receiving full knock support, in seconds.
+    decay_max_s: 0.11
     # Upper spectral centroid reference for knock-like support, in Hz.
     centroid_max_hz: 2200.0
     # Lower centroid reference rejecting very low-frequency thumps, in Hz.
@@ -191,8 +199,8 @@ classifier:
     cv_splits: 5
     # Fraction of source groups reserved only for threshold calibration.
     calibration_fraction: 0.25
-    # Maximum empirical false-positive rate when choosing a threshold.
-    max_false_positive_rate: 0.02
+    # Calibration false-positive limit trading sensitivity against synthetic noise.
+    max_false_positive_rate: 0.05
     # Inverse regularization strength of the balanced logistic regression.
     logistic_c: 1.0
     # Minimum standard-deviation scale for sparse YAMNet probability features.
@@ -205,11 +213,19 @@ classifier:
     feature_mode: yamnet_dsp
     synthetic:
       # Independent source recordings per synthetic sound kind for the dry run.
-      recordings_per_kind: 24
+      recordings_per_kind: 96
       # Labeled events per synthetic source recording.
       events_per_recording: 6
       # Separation between synthetic events, in seconds.
       interval_s: 1.2
+      # Minimum random spacing in mixed-speed synthetic training, in seconds.
+      interval_min_s: 0.3
+      # Maximum random spacing in mixed-speed synthetic training, in seconds.
+      interval_max_s: 1.2
+      # Fraction of synthetic recordings using steady human tempo with jitter.
+      steady_fraction: 0.5
+      # Maximum per-gap jitter in steady-tempo training recordings, in seconds.
+      spacing_jitter_s: 0.04
       # Lead-in before the first synthetic event, in seconds.
       first_event_s: 0.75
       # Audio retained after the last event, in seconds.
@@ -262,10 +278,28 @@ dialog:
   patterns: [2, 3, 4]
   # Interval between prompt knocks, in seconds.
   interval_s: 0.6
-  # Maximum challenge response window, in seconds.
-  window_s: 6.0
+  # Maximum response window, in seconds; allows slow triplets plus required silence.
+  window_s: 6.4
   # End a nonempty response window after this much quiet, in seconds.
   early_close_s: 2.0
+  # Match only when post-answer silence closes the round before its deadline.
+  require_silence_after: true
+  # Latest first answer knock after the response window opens, in seconds.
+  response_start_max_s: 4.0
+  # Passive listening before each challenge round, in seconds.
+  pre_listen_s: 3.0
+  # Pre-listen knock count that blocks a prompt and requests quiet.
+  max_pre_knocks: 2
+  # Maximum expected background count in a nominal response window.
+  mu_max: 1.0
+  # Delay before another passive noise check after requesting quiet, in seconds.
+  noisy_retry_s: 5.0
+  # Failed noise checks before the challenge ends with NO_RESPONSE.
+  max_noisy_tries: 6
+  # Reject response patterns whose successive gaps resemble a bouncing object.
+  reject_bounce: true
+  # Reject each successive response gap below this fraction of its predecessor.
+  bounce_gap_ratio: 0.7
   # Minimum matched rounds required for confirmation.
   min_matched_rounds: 2
   # Maximum combined independent-background match probability for confirmation.
@@ -311,8 +345,8 @@ prompter:
   fake_reply_delay_max_s: 1.5
   # Maximum simulated timing jitter of each response knock, in seconds.
   fake_jitter_s: 0.08
-  # Simulated response spacing, in seconds; separates classifier clips despite jitter.
-  fake_knock_interval_s: 1.1
+  # Human-speed spacing between simulated survivor knocks, in seconds.
+  fake_knock_interval_s: 0.55
   # Gain applied to synthetic survivor response knocks, in dB.
   fake_knock_gain_db: -3.0
   # Maximum duration of a survivor simulation, in stream seconds.

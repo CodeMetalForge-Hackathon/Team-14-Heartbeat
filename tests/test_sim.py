@@ -1,5 +1,6 @@
 from dataclasses import dataclass, replace
 import json
+from pathlib import Path
 import threading
 from types import SimpleNamespace
 
@@ -17,6 +18,26 @@ def baseline_profile():
     return replace(profile, classifier=replace(profile.classifier, name="none"))
 
 
+def classifier_profile(name):
+    profile = load_profile()
+    profile = replace(profile, classifier=replace(profile.classifier, name=name))
+    if name == "head":
+        pytest.importorskip("sklearn")
+        from heartbeat.classifiers.head import HeadClassifier
+
+        cfg = profile.classifier
+        if not Path(cfg.head_path).is_file() or not (Path(cfg.model_dir) / "yamnet.tflite").is_file():
+            pytest.skip("local head/YAMNet absent; tests never download models")
+        try:
+            head = HeadClassifier(cfg)
+        except RuntimeError as exc:
+            if "No CPU TFLite interpreter" in str(exc):
+                pytest.skip(str(exc))
+            raise
+        assert head.name == "head"
+    return profile
+
+
 def test_simulated_survivor_confirms_and_answers():
     result = run_simulation(baseline_profile(), people=2, can_move="yes", hurt="no", seed=1)
     assert result.confirmed_t is not None and result.confirmed_t <= 60
@@ -32,15 +53,86 @@ def test_simulated_survivor_confirms_and_answers():
         json.dumps(event.to_dict(), allow_nan=False)
 
 
-def test_no_survivor_noise_never_confirms_for_ten_minutes():
-    result = run_simulation(baseline_profile(), no_survivor=True, noise=True, seed=1)
+@pytest.mark.parametrize("tired", [False, True], ids=["human-speed", "tired"])
+@pytest.mark.parametrize("classifier_name", ["heuristic", "head"])
+def test_survivor_confirms_and_answers_at_human_speed(tired, classifier_name):
+    profile = classifier_profile(classifier_name)
+    if tired:
+        profile = replace(profile, prompter=dict(
+            profile.prompter, fake_knock_interval_s=0.8, fake_jitter_s=0.15,
+            fake_reply_delay_min_s=2.5, fake_reply_delay_max_s=2.5,
+        ))
+    else:
+        assert profile.prompter["fake_knock_interval_s"] == 0.55
+        assert profile.prompter["fake_jitter_s"] == 0.08
+    result = run_simulation(profile, people=2, can_move="yes", hurt="no", seed=1,
+                            duration_s=90 if tired else 60)
+    assert result.confirmed_t is not None and result.confirmed_t <= 60
+    assert result.snapshot["status"] == "CONFIRMED"
+    assert result.snapshot["answers"] == {"q_people": 2, "q_move": "yes", "q_hurt": "no"}
+    assert not [event for event in result.events if event.type == "error"]
+    assert {event.data["classifier"] for event in result.events if event.type == "sound"} == {classifier_name}
+
+
+@pytest.mark.parametrize("classifier_name", ["none", "heuristic", "head"])
+def test_no_survivor_noise_never_confirms_for_ten_minutes(classifier_name):
+    profile = classifier_profile(classifier_name)
+    result = run_simulation(profile, no_survivor=True, noise=True, seed=1)
     assert result.t == 600.0
     assert result.confirmed_t is None
     assert not [event for event in result.events
                 if event.type == "state" and event.data.get("status") == "CONFIRMED"]
     assert any(event.type == "sound" for event in result.events)
+    assert not [event for event in result.events if event.type == "error"]
+    assert {event.data["classifier"] for event in result.events if event.type == "sound"} == {classifier_name}
     for event in result.events:
         json.dumps(event.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize("noisy", [False, True], ids=["quiet", "noisy"])
+def test_background_evaluator_counts_pre_listen_as_started_and_dispatches_ticks(noisy):
+    from heartbeat.classify import Detection
+    from tools.eval_background import simulate_dialog_events
+
+    profile = baseline_profile()
+    profile = replace(profile, classifier=replace(
+        profile.classifier, evaluation=dict(profile.classifier.evaluation, challenge_interval_s=1.0),
+    ))
+    detections = [Detection(
+        t=t, peak=0.8, snr_db=20.0, gated=False, clip=np.empty(0, dtype=np.float32),
+        score=1.0, is_knock=True, classifier="scripted_noise", top=[],
+    ) for t in (1.0, 2.0)] if noisy else []
+    events = []
+    result = simulate_dialog_events(detections, 6.0, profile,
+                                    emit=lambda kind, t, data: events.append((kind, t, data)))
+    assert result["challenge_attempts"] == 6
+    assert result["challenges_started"] == 1
+    assert result["challenges_rejected"] == 5
+    assert result["false_confirmations"] == 0
+    prompts = [t for kind, t, data in events if kind == "prompt_start"]
+    if noisy:
+        assert prompts == []
+        assert any(kind == "state" and data["state"] == "TOO_NOISY" for kind, t, data in events)
+    else:
+        assert prompts == [profile.dialog["pre_listen_s"]]
+        assert result["prompt_batches"] == 1
+
+
+def test_background_evaluator_challenge_during_cooldown_replaces_old_deadline():
+    from tools.eval_background import simulate_dialog_events
+
+    profile = baseline_profile()
+    profile = replace(
+        profile, dialog=dict(profile.dialog, max_rounds=1, max_empty_windows=1),
+        classifier=replace(profile.classifier, evaluation=dict(
+            profile.classifier.evaluation, challenge_interval_s=20.0,
+        )),
+    )
+    result = simulate_dialog_events([], 30.0, profile)
+    assert result["challenge_attempts"] == result["challenges_started"] == 2
+    assert result["challenges_rejected"] == 0
+    assert result["prompt_batches"] == 2
+    assert result["false_confirmations"] == 0
 
 
 def test_fast_simulation_repeats_independent_of_worker_timing():

@@ -60,6 +60,19 @@ def test_quiet_observation_reduces_rate_but_never_below_floor():
     assert background.lambda_per_s == 1 / 600
 
 
+def test_long_inactive_gap_never_dilutes_noise_rate_with_unobserved_time():
+    background = rate()
+    background.observe(0, 3)
+    for t in (1, 2):
+        assert background.add(t)
+    measured = background.lambda_per_s
+    background.advance(100)
+    assert background.lambda_per_s == measured
+    background.observe(100, 103)  # A new pre-listen contributes only its own exposure.
+    assert background.observed_s == 6 and background.count == 2
+    assert background.lambda_per_s == pytest.approx(3 / 66)
+
+
 def test_poisson_exact_match_matches_hand_calculation():
     mu = 0.1
     assert round_p(3, 3, 6, 1 / 60) == pytest.approx(math.exp(-mu) * mu ** 3 / math.factorial(3))

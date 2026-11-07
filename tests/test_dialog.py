@@ -25,8 +25,19 @@ def sound(t, *, knock=True, gated=False):
     return SimpleNamespace(t=t, is_knock=knock, gated=gated)
 
 
+def start_challenge(engine, start=0):
+    assert engine.command("challenge", start) == []
+    assert engine.state == "PRE_LISTEN"
+    t = start + engine.cfg.pre_listen_s
+    assert engine.tick(t) == [PromptVoice("copy_knocks"), PromptKnocks(3, engine.cfg.interval_s)]
+    return t
+
+
 def answer_round(engine, start, heard=None):
     """Complete an already-returned prompt, then deliver timestamped answers."""
+    if engine.state == "PRE_LISTEN":
+        start = max(start, engine._pre_started + engine.cfg.pre_listen_s)
+        assert engine.tick(start)
     engine.on_prompts_finished(start)
     expected = engine._expected
     count = expected if heard is None else heard
@@ -39,10 +50,11 @@ def answer_round(engine, start, heard=None):
 
 
 def confirm(engine, start=0):
-    actions = engine.command("challenge", start)
-    assert actions == [PromptVoice("copy_knocks"), PromptKnocks(3, engine.cfg.interval_s)]
+    start = start_challenge(engine, start)
     t, actions = answer_round(engine, start + 1, 3)
-    assert actions == [PromptKnocks(2, engine.cfg.interval_s)]
+    assert actions == [] and engine.state == "PRE_LISTEN"
+    t += engine.cfg.pre_listen_s
+    assert engine.tick(t) == [PromptKnocks(2, engine.cfg.interval_s)]
     t, actions = answer_round(engine, t + 1, 2)
     return t, actions
 
@@ -62,11 +74,13 @@ def test_first_pattern_and_later_patterns_are_seeded_and_never_repeat():
     counts = []
     for _ in range(2):
         engine, _ = make_engine(max_empty_windows=10, max_rounds=8)
-        engine.command("challenge", 0)
+        start_challenge(engine)
         sequence = [engine._expected]
-        t = 1
+        t = engine._clock + 1
         for _ in range(7):
             t, _ = answer_round(engine, t, heard=0)
+            t += engine.cfg.pre_listen_s
+            assert engine.tick(t)
             sequence.append(engine._expected)
             t += 1
         counts.append(sequence)
@@ -80,7 +94,7 @@ def test_confirmation_requires_distinct_expected_counts_even_if_rounds_match():
     engine.command("challenge", 0)
     _, actions = answer_round(engine, 1, heard=3)
     assert engine.status == "POSSIBLE"
-    assert engine.state == "PROMPTING" and isinstance(actions[0], PromptKnocks)
+    assert engine.state == "PRE_LISTEN" and actions == []
 
 
 def test_two_empty_windows_lead_to_no_response_then_passive_cooldown():
@@ -90,10 +104,11 @@ def test_two_empty_windows_lead_to_no_response_then_passive_cooldown():
     t, actions = answer_round(engine, t + 1, heard=0)
     assert actions == []
     assert engine.state == "NO_RESPONSE" and engine.status == "NO_SIGNS"
-    assert engine.background.observed_s == 0
+    observed = engine.background.observed_s
+    assert observed == 2 * engine.cfg.pre_listen_s
     engine.tick(t + engine.cfg.cooldown_s + 2)
     assert engine.state == "LISTENING"
-    assert engine.background.observed_s == 2
+    assert engine.background.observed_s == observed + engine.cfg.cooldown_s + 2
     assert all(event["data"].get("status") in (None, "NO_SIGNS", "POSSIBLE", "CONFIRMED") for event in events)
 
 
@@ -108,49 +123,52 @@ def test_failed_challenge_retains_possible_if_any_round_matched():
 
 def test_gated_rejected_and_outside_window_detections_do_not_count():
     engine, _ = make_engine()
-    engine.command("challenge", 1)
-    engine.on_sound(sound(1.5))  # Still prompting.
-    engine.on_prompts_finished(2)
-    engine.on_sound(sound(1.9))  # Delayed prompt-time onset.
-    engine.on_sound(sound(2.2, gated=True))
-    engine.on_sound(sound(2.3, knock=False))
-    engine.on_sound(sound(3))
-    engine.tick(5)
+    start = start_challenge(engine, 1)
+    engine.on_sound(sound(start + 0.5))  # Still prompting.
+    engine.on_prompts_finished(start + 1)
+    engine.on_sound(sound(start + 0.9))  # Delayed prompt-time onset.
+    engine.on_sound(sound(start + 1.2, gated=True))
+    engine.on_sound(sound(start + 1.3, knock=False))
+    engine.on_sound(sound(start + 2))
+    engine.tick(start + 4)
     assert engine.rounds[0]["heard"] == 1
-    assert engine.rounds[0]["knock_times"] == [3]
+    assert engine.rounds[0]["knock_times"] == [start + 2]
 
 
 def test_response_early_close_uses_last_knock_and_nominal_probability_duration():
     engine, _ = make_engine()
-    engine.command("challenge", 0)
-    engine.on_prompts_finished(1)
-    for t in (2, 2.5, 3):
+    start = start_challenge(engine)
+    used = engine.snapshot()["lambda_used_per_min"] / 60
+    engine.on_prompts_finished(start + 1)
+    times = [start + value for value in (2, 2.5, 3)]
+    for t in times:
         engine.on_sound(sound(t))
-    assert engine.tick(4.99) == []
-    engine.tick(5)
-    assert engine.rounds[0]["knock_times"] == [2, 2.5, 3]
-    assert engine.rounds[0]["p"] == pytest.approx(round_p(3, 3, 6, 1 / 60))
+    assert engine.tick(start + 4.99) == []
+    engine.tick(start + 5)
+    assert engine.rounds[0]["knock_times"] == times
+    assert engine.rounds[0]["p"] == pytest.approx(round_p(3, 3, engine.cfg.window_s, used))
 
 
 def test_later_detection_cannot_extend_a_window_past_existing_quiet_deadline():
     engine, _ = make_engine()
-    engine.command("challenge", 0)
-    engine.on_prompts_finished(1)
-    engine.on_sound(sound(2))
-    actions = engine.on_sound(sound(4.1))
-    assert isinstance(actions[0], PromptKnocks)
-    assert engine.rounds[0]["knock_times"] == [2]
+    start = start_challenge(engine)
+    engine.on_prompts_finished(start + 1)
+    engine.on_sound(sound(start + 2))
+    actions = engine.on_sound(sound(start + 4.1))
+    assert actions == [] and engine.state == "PRE_LISTEN"
+    assert engine.rounds[0]["knock_times"] == [start + 2]
+    assert engine.background.count == 1  # The later sound belongs to pre-listening.
 
 
 def test_watermark_and_delayed_detections_do_not_lose_in_window_answers():
     engine, _ = make_engine()
-    engine.command("challenge", 0)
-    engine.on_prompts_finished(2)
-    assert engine.tick(1.125) == []  # Prompt completion used a newer actual clock.
-    for t in (3, 3.6, 4.2):
+    start = start_challenge(engine)
+    engine.on_prompts_finished(start + 2)
+    assert engine.tick(start + 1.125) == []  # Prompt completion used a newer actual clock.
+    for t in (start + 3, start + 3.6, start + 4.2):
         engine.on_sound(sound(t))
-    assert engine.tick(6.199) == []
-    engine.tick(6.2)
+    assert engine.tick(start + 6.199) == []
+    engine.tick(start + 6.2)
     assert engine.rounds[0]["heard"] == 3
     assert engine.rounds[0]["matched"]
 
@@ -164,12 +182,12 @@ def test_passive_rate_excludes_prompts_response_windows_and_gate_tail():
     engine.tick(10)
     assert engine.background.count == 1
     assert engine.background.observed_s == pytest.approx(5 + 3 - engine.gate_tail_s)
-    engine.command("challenge", 10)
-    engine.on_prompts_finished(12)
-    engine.on_sound(sound(13))
-    engine.tick(15)
+    start = start_challenge(engine, 10)
+    engine.on_prompts_finished(start + 2)
+    engine.on_sound(sound(start + 3))
+    engine.tick(start + 5)
     assert engine.background.count == 1
-    assert engine.background.observed_s == pytest.approx(8 - engine.gate_tail_s)
+    assert engine.background.observed_s == pytest.approx(8 - engine.gate_tail_s + engine.cfg.pre_listen_s)
 
 
 def test_external_open_gate_survives_reset_then_closes_for_passive_exposure():
@@ -178,10 +196,10 @@ def test_external_open_gate_survives_reset_then_closes_for_passive_exposure():
     engine.gate_until(float("inf"))
     engine.command("reset", 3)
     engine.tick(5)
-    assert engine.background.observed_s == 0
+    assert engine.background.observed_s == 2
     engine.gate_until(6)
     engine.tick(8)
-    assert engine.background.observed_s == 2
+    assert engine.background.observed_s == 4
 
 
 def test_spontaneous_burst_becomes_possible_and_auto_challenges_after_quiet():
@@ -191,12 +209,14 @@ def test_spontaneous_burst_becomes_possible_and_auto_challenges_after_quiet():
     assert engine.status == "POSSIBLE" and engine.state == "LISTENING"
     assert engine.tick(3.49) == []
     actions = engine.tick(3.5)
+    assert actions == [] and engine.state == "PRE_LISTEN"
+    actions = engine.tick(3.5 + engine.cfg.pre_listen_s)
     assert actions == [PromptVoice("copy_knocks"), PromptKnocks(3, engine.cfg.interval_s)]
     assert engine.background.count == 2
-    assert engine.background.observed_s == 3.5
+    assert engine.background.observed_s == 3.5 + engine.cfg.pre_listen_s
 
 
-def test_dripping_pipe_for_five_minutes_never_confirms_and_exercises_rounds():
+def test_dripping_pipe_for_five_minutes_never_confirms_and_calls_for_quiet():
     engine, events = make_engine(auto_challenge=True)
     pending_finish = None
     for index in range(3001):
@@ -216,28 +236,32 @@ def test_dripping_pipe_for_five_minutes_never_confirms_and_exercises_rounds():
         if actions:
             pending_finish = t + 0.5
         assert engine.status != "CONFIRMED"
-    assert any(event["type"] == "round_result" for event in events)
-    assert any(event["type"] == "window_open" for event in events)
+    assert any(event["type"] == "state" and event["data"]["state"] == "TOO_NOISY" for event in events)
+    assert not any(event["type"] == "window_open" for event in events)
 
 
-def test_high_background_rate_prevents_confirmation_after_two_correct_rounds():
-    engine, _ = make_engine(prior_events=60, prior_s=60)
-    t, _ = confirm(engine)
-    assert engine.state == "PROMPTING"
-    assert engine.status != "CONFIRMED"
-    assert engine.combined_p > engine.cfg.p_confirm
-    assert engine.background.lambda_per_s == 1
-
-
-def test_realistic_high_rate_extra_counts_do_not_match_any_round():
+def test_high_background_rate_blocks_challenge_before_prompting():
     engine, _ = make_engine(prior_events=60, prior_s=60)
     engine.command("challenge", 0)
-    t = 1
-    for _ in range(engine.cfg.max_rounds):
-        t, _ = answer_round(engine, t, heard=6)
-        t += 1
+    assert engine.tick(engine.cfg.pre_listen_s) == []
+    assert engine.state == "TOO_NOISY"
+    assert engine.status != "CONFIRMED"
+    assert engine.combined_p > engine.cfg.p_confirm
+    assert engine.snapshot()["mu"] > engine.cfg.mu_max
+
+
+def test_persistently_high_rate_stops_after_bounded_noisy_retries():
+    engine, _ = make_engine(prior_events=60, prior_s=60)
+    engine.command("challenge", 0)
+    t = engine.cfg.pre_listen_s
+    for attempt in range(engine.cfg.max_noisy_tries):
+        assert engine.tick(t) == []
+        if attempt + 1 < engine.cfg.max_noisy_tries:
+            t += engine.cfg.noisy_retry_s
+            engine.tick(t)
+            t += engine.cfg.pre_listen_s
     assert engine.state == "NO_RESPONSE" and engine.status == "NO_SIGNS"
-    assert not any(record["matched"] for record in engine.rounds)
+    assert engine.rounds == []
 
 
 def test_auto_interview_maps_people_yes_and_no_and_returns_confirmed():
@@ -305,12 +329,14 @@ def test_reset_restores_search_and_ignores_earlier_detections():
     engine, _ = make_engine()
     t, _ = confirm(engine)
     engine.command("approve", t)
+    background = engine.background
     engine.command("reset", t + 1)
     engine.on_sound(sound(t))
     snapshot = engine.snapshot()
     assert snapshot["state"] == "LISTENING" and snapshot["status"] == "NO_SIGNS"
     assert snapshot["rounds"] == [] and snapshot["answers"] == {} and not snapshot["approved"]
-    assert snapshot["lambda_per_min"] == 1
+    assert engine.background is background
+    assert snapshot["lambda_per_min"] == pytest.approx(background.lambda_per_s * 60)
 
 
 def test_snapshot_and_events_are_json_serializable_and_do_not_expose_mutable_state():
@@ -318,7 +344,8 @@ def test_snapshot_and_events_are_json_serializable_and_do_not_expose_mutable_sta
     confirm(engine)
     snapshot = engine.snapshot()
     assert set(snapshot) == {"state", "status", "round", "rounds", "combined_p", "odds",
-                             "answers", "approved", "lambda_per_min", "profile"}
+                             "answers", "approved", "lambda_per_min", "profile",
+                             "noisy", "mu", "lambda_used_per_min"}
     json.dumps(events, allow_nan=False)
     json.dumps(snapshot, allow_nan=False)
     snapshot["rounds"][0]["knock_times"].append(999)

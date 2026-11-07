@@ -8,7 +8,10 @@ from functools import lru_cache
 import numpy as np
 from scipy.signal import stft
 
-from ..onset import SAMPLE_RATE
+from ..onset import PRE_SAMPLES, SAMPLE_RATE
+
+
+FEATURE_SPEC_VERSION = 2  # v2 isolates an onset rather than averaging its neighbours.
 
 
 @lru_cache(maxsize=None)
@@ -32,7 +35,7 @@ def feature_names(cfg=None) -> list[str]:
     opts = settings(cfg)
     return [
         "attack_s", "decay_s", "centroid_hz", "low_ratio", "mid_ratio",
-        "high_ratio", "peak_rms",
+        "high_ratio", "peak_rms", "window_s",
         *(f"log_mel_{index:02d}" for index in range(int(opts["mel_bands"]))),
     ]
 
@@ -57,21 +60,82 @@ def _mel_filters(fft_size: int, bands: int, low_hz: float, high_hz: float):
     return filters
 
 
+def _envelope(x, window):
+    """Linear-time centred RMS, including only samples in the supplied window."""
+    padded = np.pad(x * x, (window // 2, window - window // 2))
+    cumulative = np.concatenate(([0.0], np.cumsum(padded)))
+    return np.sqrt(np.maximum((cumulative[window:] - cumulative[:-window])[:len(x)] / window, 0))
+
+
+def feature_window(clip, cfg=None) -> np.ndarray:
+    """Select the pre-roll and one short impact, leaving the input untouched.
+
+    Onset clips start PRE_SAMPLES before the detector's sample-clock onset.
+    After the initial peak has decayed, a renewed envelope rise marks a later
+    impact. Split at its preceding envelope minimum, before the rising edge
+    enters the spectrum or the decay measurement. YAMNet still gets the full
+    original clip through FeatureExtractor.
+    """
+    opts = settings(cfg)
+    x = np.asarray(clip, dtype=np.float64)
+    if x.ndim != 1 or not np.all(np.isfinite(x)):
+        raise ValueError("DSP features require finite mono audio")
+    post = float(opts["feature_post_s"])
+    minimum = float(opts["feature_next_min_s"])
+    rise_db = float(opts["feature_next_rise_db"])
+    quiet_s = float(opts["feature_next_quiet_s"])
+    if not (np.isfinite(post) and np.isfinite(minimum) and np.isfinite(rise_db)
+            and np.isfinite(quiet_s) and 0 < minimum < post
+            and 0 < quiet_s < post and rise_db > 0):
+        raise ValueError("DSP feature window and later-onset rise settings are invalid")
+    x = x[:PRE_SAMPLES + max(1, round(post * SAMPLE_RATE))]
+    if not len(x):
+        return np.zeros(1)
+    window = max(1, round(float(opts["envelope_s"]) * SAMPLE_RATE))
+    envelope = _envelope(x, window)
+    search_end = min(len(x), PRE_SAMPLES + round(minimum * SAMPLE_RATE))
+    if search_end <= PRE_SAMPLES:
+        return x
+    peak = PRE_SAMPLES + int(np.argmax(envelope[PRE_SAMPLES:search_end]))
+    tail_start = max(peak + window, search_end)
+    if tail_start >= len(x):
+        return x
+    baseline = float(np.median(envelope[:PRE_SAMPLES]))
+    decay_floor = max(baseline, float(envelope[peak]) * 10 ** (float(opts["decay_db"]) / 20))
+    tail = envelope[tail_start:]
+    trough = np.minimum.accumulate(tail)
+    # Resonant modes beat within a single knock. Brief envelope troughs must
+    # not arm a later onset: require a continuous stretch below the floor.
+    quiet_samples = max(1, round(quiet_s * SAMPLE_RATE))
+    if len(tail) < quiet_samples:
+        return x
+    quiet = np.concatenate(([0], np.cumsum(tail <= decay_floor)))
+    run = quiet[quiet_samples:] - quiet[:-quiet_samples]
+    armed = np.maximum.accumulate(np.pad(run >= quiet_samples,
+                                         (quiet_samples - 1, 0)))
+    rise = 10 ** (rise_db / 20)
+    later = np.flatnonzero(armed &
+                          (tail > np.maximum(decay_floor, trough * rise)))
+    if len(later):
+        # Ignore the first sample: it has no preceding decayed envelope.
+        crossing = int(later[0])
+        if crossing:
+            preceding = max(0, crossing - quiet_samples)
+            split = tail_start + preceding + int(np.argmin(tail[preceding:crossing]))
+            return x[:max(1, split - window // 2)]
+    return x
+
+
 def extract_features(clip, cfg=None) -> np.ndarray:
     """Return attack, decay, spectrum, crest factor and log-mel means.
 
     Attack measures the envelope's first configured fractional crossing before
     its peak; decay ends at the last crossing above the configured relative dB
     level. Using the last crossing avoids treating an oscillation's zero as
-    the end of a resonant impact. Input can be any finite mono length, so the
-    same extractor serves both zero-padded onset clips and data tools.
+    the end of a resonant impact. All DSP features use only feature_window;
+    nearby human knocks cannot move the peak or lengthen the decay.
     """
     opts = settings(cfg)
-    x = np.asarray(clip, dtype=np.float64)
-    if x.ndim != 1 or not np.all(np.isfinite(x)):
-        raise ValueError("DSP features require finite mono audio")
-    if not len(x):
-        x = np.zeros(1)
     floor = float(opts["log_floor"])
     frame_size = int(opts["fft_size"])
     hop = int(opts["fft_hop"])
@@ -83,11 +147,9 @@ def extract_features(clip, cfg=None) -> np.ndarray:
     if not 0 <= float(opts["mel_low_hz"]) < float(opts["mel_high_hz"]) <= SAMPLE_RATE / 2:
         raise ValueError("Mel bounds must lie within the audio Nyquist range")
 
-    # Linear-time moving mean of squared amplitude avoids a wide convolution.
+    x = feature_window(clip, opts)
     window = max(1, round(float(opts["envelope_s"]) * SAMPLE_RATE))
-    padded = np.pad(x * x, (window // 2, window - window // 2))
-    cumulative = np.concatenate(([0.0], np.cumsum(padded)))
-    envelope = np.sqrt(np.maximum((cumulative[window:] - cumulative[:-window])[:len(x)] / window, 0))
+    envelope = _envelope(x, window)
     peak_index = int(np.argmax(envelope))
     envelope_peak = float(envelope[peak_index])
     if envelope_peak > 0:
@@ -124,7 +186,10 @@ def extract_features(clip, cfg=None) -> np.ndarray:
     crest = float(np.max(np.abs(x)) / max(rms, floor))
     mel_power = _mel_filters(frame_size, bands, float(opts["mel_low_hz"]), float(opts["mel_high_hz"])) @ power
     log_mel = np.log(np.maximum(mel_power, floor)).mean(axis=1)
-    result = np.concatenate(([attack, decay, centroid, low, middle, high, crest], log_mel))
+    # Duration tells the head that a later onset truncated the analysis; it
+    # must not infer this from background-dependent log-mel averages alone.
+    result = np.concatenate(([attack, decay, centroid, low, middle, high, crest,
+                              len(x) / SAMPLE_RATE], log_mel))
     if not np.all(np.isfinite(result)):
         raise ValueError("DSP feature computation produced non-finite values")
     return result

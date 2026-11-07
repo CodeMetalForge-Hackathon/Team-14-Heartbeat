@@ -41,28 +41,33 @@ class HeuristicClassifier:
         evidence = {}
         for name, (feature, limit) in maximum_rules.items():
             threshold = float(opts[limit])
-            if threshold <= 0:
-                raise ValueError(f"Heuristic {limit} must be positive")
+            if not np.isfinite(threshold) or threshold <= 0:
+                raise ValueError(f"Heuristic {limit} must be finite and positive")
             evidence[name] = float(np.clip(2 - features[feature] / threshold, 0, 1))
         threshold = float(opts["centroid_min_hz"])
-        if threshold <= 0:
-            raise ValueError("Heuristic centroid_min_hz must be positive")
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("Heuristic centroid_min_hz must be finite and positive")
         evidence["centroid_low"] = float(np.clip(features["centroid_hz"] / threshold - 1, 0, 1))
         threshold = float(opts["peak_rms_min"])
-        if threshold <= 0:
-            raise ValueError("Heuristic peak_rms_min must be positive")
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("Heuristic peak_rms_min must be finite and positive")
         evidence["peak_rms"] = float(np.clip(features["peak_rms"] / threshold, 0, 1))
         self.last_evidence = dict(evidence)
         weights = opts["weights"]
         total = sum(float(weights[name]) for name in evidence)
-        if total <= 0 or any(float(weights[name]) < 0 for name in evidence):
-            raise ValueError("Heuristic weights must be nonnegative with positive total")
+        if (not np.isfinite(total) or total <= 0 or
+                any(not np.isfinite(float(weights[name])) or float(weights[name]) < 0
+                    for name in evidence)):
+            raise ValueError("Heuristic weights must be finite and nonnegative with positive total")
         score = 1.0
         for name, value in evidence.items():
             weight = float(weights[name])
             if weight:
                 score *= value ** (weight / total)
-        return float(np.clip(score, 0, 1))
+        score = float(np.clip(score, 0, 1))
+        if not np.isfinite(score):
+            raise ValueError("Heuristic produced a nonfinite score")
+        return score
 
     def classify(self, onset) -> Detection:
         started = perf_counter()
