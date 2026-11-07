@@ -323,6 +323,8 @@ dialog:
   # Ordered interview voice keys.
   questions: [q_people, q_move, q_hurt]
 prompter:
+  # Use voice when an output is available, or choose none for knock-only operation.
+  voice: auto
   # Continue suppressing prompt sounds for this many seconds after completion.
   gate_tail_s: 0.6
   # Directory of pre-generated voice WAVs, relative to the repository root.

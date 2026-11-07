@@ -1,0 +1,22 @@
+# Template: render the @...@ placeholders using docs/PI.md before installing.
+[Unit]
+Description=Heartbeat rubble sentinel
+Wants=network-online.target
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=dialout audio
+WorkingDirectory=@REPO@
+Environment=PYTHONUNBUFFERED=1
+# Setup installs ml; --no-sync keeps boot independent of package downloads.
+ExecStart="@UV@" run --no-sync --extra ml hb run --device stick --knocker auto --dashboard --auto
+Restart=on-failure
+RestartSec=@RESTART_SEC@s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=heartbeat
+
+[Install]
+WantedBy=multi-user.target

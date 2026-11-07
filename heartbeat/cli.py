@@ -109,6 +109,16 @@ def _parser() -> argparse.ArgumentParser:
     led = rover_commands.add_parser("led")
     for color in ("r", "g", "b"):
         led.add_argument(color, type=int)
+    doctor = commands.add_parser("doctor", help="check sentinel hardware and deployment readiness")
+    doctor.add_argument("--device", type=_device, default="stick", help="stick, stick:<port>, or audio device")
+    doctor.add_argument("--speaker-device", type=_device)
+    doctor.add_argument("--play", action="store_true", help="play the reassurance prompt to test the speaker")
+    doctor.add_argument("--profile", default="rubble")
+    bench = commands.add_parser("bench", help="measure the CPU pipeline on synthetic audio without hardware")
+    bench.add_argument("--seconds", type=_positive_float, help="scene length; defaults to diagnostics.yaml")
+    bench.add_argument("--classifier", help="override the profile classifier for this measurement")
+    bench.add_argument("--seed", type=int)
+    bench.add_argument("--profile", default="rubble")
     return parser
 
 
@@ -538,6 +548,18 @@ def main(argv: list[str] | None = None) -> int:
         profile = load_profile(args.profile)
         if args.command == "rover":
             return _rover(args, profile, bus)
+        if args.command == "doctor":
+            from .doctor import format_doctor, run_doctor
+
+            checks = run_doctor(profile, device=args.device, speaker_device=args.speaker_device, play=args.play)
+            print(format_doctor(checks))
+            return 0 if all(check.ok or check.skipped for check in checks) else 1
+        if args.command == "bench":
+            from .doctor import format_bench, run_bench
+
+            result = run_bench(profile, seconds=args.seconds, classifier=args.classifier, seed=args.seed)
+            print(format_bench(result))
+            return 0 if not result.get("errors") else 1
         if args.command == "listen":
             return _listen(args, profile, bus)
         if args.command == "record":

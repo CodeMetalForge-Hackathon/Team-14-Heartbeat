@@ -1,0 +1,41 @@
+doctor:
+  # Required delivered microphone audio, measured by sample count, in seconds.
+  audio_seconds: 2.0
+  # Maximum wait without an audio block before reporting a stalled source, in seconds.
+  audio_stall_timeout_s: 5.0
+  # Total wall-time limit for opening and sampling the chosen microphone, in seconds.
+  audio_timeout_s: 10.0
+  # Maximum wait for the audio reader to finish after closing its source, in seconds.
+  audio_close_timeout_s: 1.0
+  # Lowest RMS amplitude accepted as non-silent normalized audio.
+  min_audio_rms: 1.0e-5
+  # Minimum free space for session recordings, in bytes.
+  min_free_disk_bytes: 1073741824
+  # Maximum wait for a board's PONG identity at each protocol baud rate, in seconds.
+  serial_timeout_s: 0.35
+  # Maximum blocking interval for each diagnostic serial read, in seconds.
+  serial_read_poll_s: 0.05
+  # Maximum blocking interval for a diagnostic PING write, in seconds.
+  serial_write_timeout_s: 0.25
+  # Maximum ASCII reply length accepted during board identification, in bytes.
+  max_serial_line_bytes: 512
+  # Maximum wait for a local diagnostic subprocess, in seconds.
+  command_timeout_s: 2.0
+  # CPU temperature at which doctor reports cooling is needed, in degrees Celsius.
+  max_temp_c: 80.0
+bench:
+  # Synthetic audio duration for the deployability benchmark, in stream seconds.
+  seconds: 120.0
+  # Random seed for repeatable synthetic audio and dialog responses.
+  seed: 1
+  # Include synthetic distractors in addition to the simulated survivor.
+  noise: true
+  # Number of people reported by the simulated survivor.
+  people: 2
+  # Simulated answer to the movement question.
+  can_move: "yes"
+  # Simulated answer to the injury question.
+  hurt: "yes"
+deploy:
+  # Delay before systemd retries a failed sentinel process, in seconds.
+  restart_s: 5.0

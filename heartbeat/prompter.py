@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PrompterConfig:
+    voice: str
     gate_tail_s: float
     voice_dir: str
     manual_knock_tail_s: float
@@ -84,7 +85,7 @@ class PrompterConfig:
         if missing:
             raise ValueError(f"Missing prompter keys: {', '.join(sorted(missing))}")
         for name, item in data.items():
-            if name in {"voice_dir", "sim_initial_knock_times_s", "sim_noise_kinds"}:
+            if name in {"voice", "voice_dir", "sim_initial_knock_times_s", "sim_noise_kinds"}:
                 continue
             if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item):
                 raise ValueError(f"prompter.{name} must be a finite number")
@@ -106,6 +107,8 @@ class PrompterConfig:
             raise ValueError("Simulated replies must start after prompter.gate_tail_s")
         if round(data["sim_chunk_s"] * SAMPLE_RATE) < 1:
             raise ValueError("prompter.sim_chunk_s must contain at least one audio sample")
+        if not isinstance(data["voice"], str) or data["voice"] not in {"auto", "none"}:
+            raise ValueError("prompter.voice must be auto or none")
         if not isinstance(data["voice_dir"], str) or not data["voice_dir"].strip():
             raise ValueError("prompter.voice_dir must be a nonempty path")
         initial = data["sim_initial_knock_times_s"]
@@ -136,6 +139,8 @@ class _BasePrompter:
         self.bus: EventBus | None = bus
         self.cfg = PrompterConfig.from_dict(cfg)
         self.clock: Callable[[], float] = clock if clock is not None else lambda: 0.0
+        self._voice_disabled = False
+        self._voice_warning_sent = False
 
     def _emit(self, type: str, **data) -> None:
         if self.bus is not None:
@@ -145,6 +150,20 @@ class _BasePrompter:
 
     def _error(self, message: str, *, code: str, severity: str = "error", **data) -> None:
         self._emit("error", source="prompter", code=code, severity=severity, message=message, **data)
+
+    def disable_voice(self, reason: str) -> None:
+        self._voice_disabled = True
+        if not self._voice_warning_sent:
+            self._voice_warning_sent = True
+            self._error(f"Voice prompts skipped ({reason}); continuing with knock-only prompts.",
+                        code="voice_disabled", severity="warning")
+
+    def _skip_voice(self, action: Action) -> bool:
+        if not isinstance(action, PromptVoice):
+            return False
+        if self.cfg.voice == "none":
+            self.disable_voice("prompter.voice=none")
+        return self._voice_disabled
 
     def _voice_path(self, key: str) -> Path:
         if key not in VOICE_TEXT and key != "knock":
@@ -182,6 +201,8 @@ class ManualPrompter(_BasePrompter):
         self.stream = stream if stream is not None else sys.stdout
 
     def run(self, action: Action) -> None:
+        if self._skip_voice(action):
+            return
         try:
             duration = self.duration(action)
             if isinstance(action, PromptKnocks):
@@ -199,25 +220,29 @@ class ManualPrompter(_BasePrompter):
 
 class SpeakerPrompter(_BasePrompter):
     def __init__(self, device=None, *, bus=None, cfg=None, clock=None, audio=None, sleep=None,
-                 monotonic=None, manual=None):
+                 monotonic=None, manual=None, skip_failed_voice=False):
         super().__init__(bus, cfg=cfg, clock=clock)
         self.device = device
         self._audio = audio
         self.sleep = sleep if sleep is not None else time.sleep
         self.monotonic = monotonic if monotonic is not None else time.monotonic
         self.manual = manual if manual is not None else ManualPrompter(bus, cfg=self.cfg, clock=clock, sleep=sleep)
+        self.skip_failed_voice = skip_failed_voice
+        self.unavailable_reason = "no usable audio output"
 
     def _backend(self):
         if self._audio is None:
             self._audio = importlib.import_module("sounddevice")
         return self._audio
 
-    def available(self) -> bool:
+    def available(self, *, report=True) -> bool:
         try:
             self._backend().check_output_settings(device=self.device, channels=1, samplerate=SAMPLE_RATE)
             return True
         except Exception as exc:
-            self._error(f"Speaker unavailable: {exc}", code="speaker_unavailable", severity="warning")
+            self.unavailable_reason = str(exc)
+            if report:
+                self._error(f"Speaker unavailable: {exc}", code="speaker_unavailable", severity="warning")
             return False
 
     def _play(self, key: str) -> None:
@@ -227,6 +252,8 @@ class SpeakerPrompter(_BasePrompter):
         self._backend().play(samples, samplerate=rate, device=self.device, blocking=True)
 
     def run(self, action: Action) -> None:
+        if self._skip_voice(action):
+            return
         try:
             self.duration(action)  # Validate actions before touching the output device.
             if isinstance(action, PromptVoice):
@@ -240,6 +267,9 @@ class SpeakerPrompter(_BasePrompter):
                         if remaining > 0:
                             self.sleep(remaining)
         except Exception as exc:
+            if isinstance(action, PromptVoice) and self.skip_failed_voice:
+                self.disable_voice(f"speaker playback unavailable: {exc}")
+                return
             self._error(f"Speaker prompt failed: {exc}; using operator prompt", code="speaker_prompt_failed")
             self.manual.run(action)
 
@@ -454,11 +484,28 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
     cfg = PrompterConfig.from_dict(cfg)
     manual = ManualPrompter(bus, cfg=cfg, clock=clock, sleep=sleep)
     if spec == "manual":
+        if cfg.voice == "none":
+            manual.disable_voice("prompter.voice=none")
         return manual
     speaker = SpeakerPrompter(
         speaker_device, bus=bus, cfg=cfg, clock=clock, audio=audio, sleep=sleep,
-        monotonic=monotonic, manual=manual,
+        monotonic=monotonic, manual=manual, skip_failed_voice=True,
     )
+
+    def voice_backend():
+        if cfg.voice == "none":
+            speaker.disable_voice("prompter.voice=none")
+        elif not speaker.available(report=False):
+            speaker.disable_voice(speaker.unavailable_reason)
+        return speaker
+
+    def speaker_or_manual():
+        if speaker.available(report=False):
+            if cfg.voice == "none":
+                speaker.disable_voice("prompter.voice=none")
+            return speaker
+        manual.disable_voice(speaker.unavailable_reason)
+        return manual
 
     def knocker(port):
         return SerialKnocker(
@@ -467,9 +514,9 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
         )
 
     if spec == "speaker":
-        return speaker
+        return speaker_or_manual()
     if spec.startswith("/dev/") or re.fullmatch(r"COM[0-9]+", spec, re.IGNORECASE):
-        return CompositePrompter(speaker, knocker(spec))
+        return CompositePrompter(voice_backend(), knocker(spec))
     if spec != "auto":
         raise ValueError(f"Unknown prompter: {spec}")
     try:
@@ -484,7 +531,7 @@ def make_prompter(spec: str, bus=None, *, cfg=None, clock=None, speaker_device=N
                 continue
             candidate = knocker(device)
             if candidate.probe():
-                return CompositePrompter(speaker, candidate)
+                return CompositePrompter(voice_backend(), candidate)
     except Exception as exc:
         manual._error(f"Serial discovery failed: {exc}", code="serial_scan_failed", severity="warning")
-    return speaker if speaker.available() else manual
+    return speaker_or_manual()
