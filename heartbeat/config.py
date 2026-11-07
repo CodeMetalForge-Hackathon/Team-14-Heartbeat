@@ -1,6 +1,6 @@
 """Typed profile sections; hardware-independent defaults live in YAML."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from importlib.metadata import PackageNotFoundError, distribution
 from math import isfinite
 from pathlib import Path
@@ -62,10 +62,11 @@ class Profile:
     dialog: dict[str, Any]
     prompter: dict[str, Any]
     server: dict[str, Any]
+    rover: dict[str, Any] = field(default_factory=dict)
 
 
 _PROFILE_DIR = Path(__file__).resolve().parent.parent / "profiles"
-_SECTIONS = ("audio", "onset", "classifier", "dialog", "prompter", "server")
+_SECTIONS = ("audio", "onset", "classifier", "dialog", "prompter", "server", "rover")
 
 
 def _profile_dir() -> Path:
@@ -187,7 +188,7 @@ def _validate(profile: Profile, synth_template: dict):
 def load_profile(name_or_path: str | Path = "rubble") -> Profile:
     """Load a named or explicit YAML profile, inheriting omitted rubble settings.
 
-    The dialog, prompter and server mappings intentionally remain unrestricted
+    The dialog, prompter, server and rover mappings intentionally remain unrestricted
     until their owning prompts define them. All currently defined keys are strict.
     """
     profile_dir = _profile_dir()
@@ -204,6 +205,7 @@ def load_profile(name_or_path: str | Path = "rubble") -> Profile:
         dialog=dict(data.get("dialog", {})),
         prompter=dict(data.get("prompter", {})),
         server=dict(data.get("server", {})),
+        rover=dict(data.get("rover", {})),
     )
     _validate(profile, default["audio"]["synth"])
     return profile

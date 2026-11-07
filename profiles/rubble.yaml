@@ -424,3 +424,60 @@ server:
     trace_grid_db: 20.0
     # Horizontal plot-grid spacing, in seconds.
     trace_grid_s: 5.0
+rover:
+  # Fixed rover v1 USB serial rate, in baud.
+  baud: 115200
+  # Maximum serial read poll, in seconds.
+  read_timeout_s: 0.05
+  # Bound command writes so STOP cannot wait indefinitely behind another write.
+  write_timeout_s: 0.1
+  # Maximum wait for a rover identity handshake, in seconds.
+  connect_timeout_s: 2.0
+  # Maximum wait for a non-motion reply, in seconds.
+  command_timeout_s: 3.0
+  # Host motion timeout, in seconds; firmware independently stops after 30 seconds.
+  move_timeout_s: 35.0
+  # Heartbeat interval during motion; never exceed 0.5 seconds.
+  heartbeat_s: 0.5
+  # Maximum travel per command in centimeters; may only tighten the firmware limit.
+  max_drive_cm: 100.0
+  # Maximum turn per command in degrees; may only tighten the firmware limit.
+  max_turn_deg: 180.0
+  # Maximum motor speed percent; may only tighten the firmware limit.
+  max_speed_pct: 60
+  # Speed percent for manual CLI moves when --speed is omitted.
+  default_speed_pct: 30
+  # Smallest supported positive EEPROM calibration coefficient.
+  calibration_min: 0.001
+  # Largest supported EEPROM calibration coefficient.
+  calibration_max: 100000.0
+  # Initial wheel degrees per centimeter; approximate until measured on the rover.
+  calibration_deg_per_cm: 18.0
+  # Initial wheel degrees per chassis turn degree; approximate until measured.
+  calibration_deg_per_turn_deg: 2.5
+  # Requested straight travel for the interactive human calibration, in centimeters.
+  calibration_drive_cm: 50.0
+  # Requested chassis turn for the interactive human calibration, in degrees.
+  calibration_turn_deg: 90.0
+  # Conservative motor speed percent used during interactive calibration.
+  calibration_speed_pct: 20
+  # Simulated linear speed in centimeters per stream second.
+  fake_speed_cm_s: 20.0
+  # Simulated angular speed in degrees per stream second.
+  fake_turn_deg_s: 90.0
+  # Motor-off settling time before opening detection, in stream seconds.
+  settle_s: 2.0
+  # Maximum dialog time at each gap, in stream seconds.
+  gap_timeout_s: 120.0
+  # Motor speed percent for route legs.
+  speed_pct: 30
+  # Stop the audio pipeline after the final patrol result.
+  stop_on_done: true
+  # The only gap with a simulated survivor in the hardware-free patrol.
+  sim_survivor_gap: Gap 2
+  # RGB ring color for NO_SIGNS.
+  led_no_signs: [64, 64, 64]
+  # RGB ring color for POSSIBLE.
+  led_possible: [255, 128, 0]
+  # RGB ring color for CONFIRMED.
+  led_confirmed: [255, 0, 0]

@@ -96,6 +96,19 @@ def _parser() -> argparse.ArgumentParser:
     replay.add_argument("--classifier")
     report = commands.add_parser("report", help="write a session after-action report")
     report.add_argument("run_dir", type=Path)
+    rover = commands.add_parser("rover", help="control the Ranger link; a human runs motor commands")
+    rover.add_argument("--port", required=True, help="rover USB serial port")
+    rover.add_argument("--profile", default="rubble")
+    rover_commands = rover.add_subparsers(dest="rover_command", required=True)
+    for name in ("ping", "stop", "status", "calibrate"):
+        rover_commands.add_parser(name)
+    for name, unit in (("drive", "cm"), ("turn", "deg")):
+        motion = rover_commands.add_parser(name)
+        motion.add_argument(unit, type=float)
+        motion.add_argument("--speed", type=float, help="motor speed percent; defaults to the profile")
+    led = rover_commands.add_parser("led")
+    for color in ("r", "g", "b"):
+        led.add_argument(color, type=int)
     return parser
 
 
@@ -447,6 +460,56 @@ def _sim(args, profile, bus) -> int:
     return 0 if result.confirmed_t is not None and all(answers.get(k) == v for k, v in expected.items()) else 1
 
 
+def _calibrate_rover(link, cfg) -> bool:
+    """A human measures both motions; establish a known EEPROM baseline first."""
+    straight, turn = cfg["calibration_deg_per_cm"], cfg["calibration_deg_per_turn_deg"]
+    distance, angle = cfg["calibration_drive_cm"], cfg["calibration_turn_deg"]
+    speed = cfg["calibration_speed_pct"]
+    print("Calibration will move the rover. Use an unobstructed level surface; Ctrl-C stops it.")
+    input("Press Enter to save the profile baseline and begin the straight measurement: ")
+    if not link.calibrate(straight, turn) or not link.drive(distance, speed):
+        return False
+    measured = _positive_float(input(f"Requested {distance:g} cm. Actual distance in cm: "))
+    straight *= distance / measured
+    if not link.calibrate(straight, turn):
+        return False
+    input(f"Press Enter to begin the {angle:g}-degree turn measurement: ")
+    if not link.turn(angle, speed):
+        return False
+    measured = _positive_float(input("Actual turn magnitude in degrees: "))
+    turn *= angle / measured
+    if not link.calibrate(straight, turn):
+        return False
+    print(f"Saved CAL {straight:g} {turn:g}. Recheck both distances before patrol.")
+    return True
+
+
+def _rover(args, profile, bus) -> int:
+    from .rover import RoverLink
+
+    bus.subscribe(lambda event: print(json.dumps(event.data), flush=True)
+                  if event.type == "rover" else None)
+    link = RoverLink(args.port, cfg=profile.rover, bus=bus)
+    try:
+        name = args.rover_command
+        if name == "calibrate":
+            ok = _calibrate_rover(link, profile.rover)
+        elif name == "drive":
+            ok = link.drive(args.cm, args.speed)
+        elif name == "turn":
+            ok = link.turn(args.deg, args.speed)
+        elif name == "led":
+            ok = link.led(args.r, args.g, args.b)
+        else:
+            ok = getattr(link, name)()
+        return 0 if ok else 1
+    except KeyboardInterrupt:
+        link.estop()
+        raise
+    finally:
+        link.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     args._argv = list(sys.argv if argv is None else ["hb", *argv])
@@ -473,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"matched {result['matched']}, missing {result['missing']}, new {result['new']}")
             return 0
         profile = load_profile(args.profile)
+        if args.command == "rover":
+            return _rover(args, profile, bus)
         if args.command == "listen":
             return _listen(args, profile, bus)
         if args.command == "record":
