@@ -1,7 +1,7 @@
 # Continuous vocal monitoring
 
 This experimental mode runs three-second CLAP windows every second alongside
-the existing impact classifier. It reports SCREAM, SHOUT, CRYING, SPEECH, OTHER,
+the existing impact classifier. It reports SCREAM, SHOUT, CRYING, SPEECH, BREATHING, OTHER,
 or UNCERTAIN. Vocal events never enter the knock-counting dialog or control
 motors. Possible distress is a request for human review, not confirmation.
 
@@ -27,6 +27,19 @@ Listening continues until Ctrl+C. Test normal speech, a brief raised voice,
 crying-like sounds, knocks, and non-vocal noise separately. Do not strain your
 voice. Record which sounds you actually made to evaluate false alerts and misses.
 The threshold is experimental; relative scores are not accuracy percentages.
+
+`BREATHING` is informational and never raises a distress alert by itself or
+triggers transcription. Its descriptions cover audible breathing and panting;
+comparison descriptions include wind, fans, and clothing rustling. In a quiet
+room, try normal breathing near the microphone without blowing directly into
+it, then compare with those background sounds. No need to strain or hold your
+breath. Quiet audio below the existing -50 dBFS window gate is skipped. Breathing
+recognition has not been acoustically validated, especially at distance or
+through debris; it does not measure respiration rate or medical condition.
+
+After updating descriptions, restart both the CLAP service and listener. Their
+description sets must match. Adding categories changes relative scores, so
+repeat the speech, scream, and non-vocal checks too.
 
 For the dashboard and manual prompts:
 

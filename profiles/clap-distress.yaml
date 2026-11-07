@@ -61,12 +61,19 @@ classifier:
           - The sound of a person crying and sobbing.
         SPEECH:
           - The sound of a person speaking normally.
+        # Informational only: breathing does not trigger a distress alert.
+        BREATHING:
+          - The sound of a person breathing in and out.
+          - The sound of a person breathing heavily and panting.
         OTHER:
           - The sound of people laughing and cheering.
           - The sound of music or television playing.
           - The sound of machinery and motors running.
           - The sound of knocking or objects banging on a table.
           - The sound of quiet background room noise.
+          - The sound of wind blowing across a microphone.
+          - The sound of a fan blowing air.
+          - The sound of clothing rustling against a microphone.
       # Optional English transcription. Off avoids an extra model download.
       asr:
         enabled: false

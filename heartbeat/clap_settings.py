@@ -59,8 +59,9 @@ def validate_monitor(cfg):
             and round(cfg["hop_s"] * SAMPLE_RATE) >= 1):
         raise ValueError("CLAP monitor values out of range")
     prompts = cfg["prompts"]
-    if not isinstance(prompts, dict) or set(prompts) != {"SCREAM", "SHOUT", "CRYING", "SPEECH", "OTHER"}:
-        raise ValueError("Monitor requires SCREAM, SHOUT, CRYING, SPEECH, OTHER prompts")
+    required_labels = {"SCREAM", "SHOUT", "CRYING", "SPEECH", "OTHER"}
+    if not isinstance(prompts, dict) or set(prompts) - {"BREATHING"} != required_labels:
+        raise ValueError("Monitor requires SCREAM, SHOUT, CRYING, SPEECH, OTHER; BREATHING is optional")
     values = [p for group in prompts.values() if isinstance(group, list) for p in group]
     if (any(not isinstance(group, list) or not group for group in prompts.values())
             or any(not isinstance(p, str) or not p.strip() for p in values)

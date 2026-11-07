@@ -136,8 +136,9 @@ def test_phrase_matching_requires_whole_words():
 def test_decoding_is_not_a_knock_and_phrase_requires_enabled_asr(profile):
     cfg = profile.classifier.clap["monitor"]
     body = np.zeros(48000, dtype="<f4").tobytes()
+    count = sum(len(prompts) for prompts in cfg["prompts"].values())
     response = {"monitor": monitor_identity(cfg), "clip_sha256": sha256(body).hexdigest(),
-                "scores": [.9] + [.1 / 8] * 8}
+                "scores": [.9] + [.1 / (count - 1)] * (count - 1)}
     observation = decode_observation(cfg, response, body)
     assert observation["label"] == "SCREAM" and observation["possible_distress"]
     assert "is_knock" not in observation
@@ -193,5 +194,30 @@ def test_observe_http_contract_and_missing_capability(profile):
     recognizer.transcriber = transcribe
     assert recognizer._transcribe(np.zeros(48000, np.float32), "SPEECH") == ""
     assert recognizer._transcribe(np.full(48000, .2, np.float32), "OTHER") == ""
+    assert recognizer._transcribe(np.full(48000, .2, np.float32), "BREATHING") == ""
     assert recognizer._transcribe(np.full(48000, .2, np.float32), "SPEECH") == "Help me!"
     assert len(requests) == 1 and requests[0]["sampling_rate"] == 16000
+
+
+def test_breathing_is_informational_and_never_raises_distress(profile):
+    cfg = profile.classifier.clap["monitor"]
+    labels = [label for label, prompts in cfg["prompts"].items() for _ in prompts]
+    def observe(clip):
+        body = clip.astype("<f4").tobytes()
+        scores = [.9 / labels.count("BREATHING") if label == "BREATHING"
+                  else .1 / (len(labels) - labels.count("BREATHING")) for label in labels]
+        return decode_observation(cfg, {"monitor": monitor_identity(cfg),
+                                  "clip_sha256": sha256(body).hexdigest(), "scores": scores}, body)
+    monitor, _, events = make_monitor(profile, observe)
+    feed(monitor, 0, 260)
+    observations = [e for e in events if e.type == "audio_observation"]
+    assert observations and all(e.data["label"] == "BREATHING" for e in observations)
+    assert all(not e.data["possible_distress"] and not e.data["alert"] for e in observations)
+    assert not any(e.type in {"sound", "answer", "state"} for e in events)
+    monitor.close()
+
+
+def test_existing_monitor_profiles_without_breathing_still_work(profile):
+    cfg = profile.classifier.clap["monitor"]
+    del cfg["prompts"]["BREATHING"]
+    validate_monitor(cfg)
