@@ -405,7 +405,9 @@ class _DialogConsole:
                 text += f" · {data['fault']}"
         elif event.type == "rover" and data.get("reply", {}).get("kind") == "NAV":
             reply = data["reply"]
-            text = f"NAV {reply['state']} · front {reply['cm']:.1f} cm"
+            text = ("NAV SENSOR_WAIT · motors stopped; retrying distance sensor"
+                    if reply["state"] == "SENSOR_WAIT" else
+                    f"NAV {reply['state']} · front {reply['cm']:.1f} cm")
         elif event.type == "patrol_cue":
             text = f"ROVER {data['phase']}: {data['label']} at {data['end']:.2f}s"
         elif event.type == "round_result":

@@ -495,11 +495,11 @@ rover:
   navigation:
     # Confirmed ultrasonic connector; the line sensor on port 9 is unused.
     sensor_port: 6
-    # Stop a forward segment when an obstacle is this close, in cm.
+    # Stop forward travel when an obstacle is this close, in cm.
     stop_cm: 30
-    # Require this much front clearance before starting a forward segment, in cm.
+    # Require this much front clearance before starting forward travel, in cm.
     clear_cm: 45
-    # Encoder travel per autonomous forward segment, in cm.
+    # Encoder checkpoint spacing during continuous forward travel, in cm; no stop at checkpoints.
     step_cm: 20
     # Clockwise in-place search turn; direction requires hardware verification.
     turn_deg: 45
@@ -507,10 +507,14 @@ rover:
     max_turns: 8
     # Interval between front-range checks during forward movement, in milliseconds.
     poll_ms: 80
-    # Motor-off wait before measuring and choosing the next segment, in milliseconds.
+    # Motor-off settling before startup, post-turn decisions or sensor recovery, in milliseconds.
     settle_ms: 200
     # Refuse even an in-place turn when the front obstacle is closer than this, in cm.
     turn_clearance_cm: 15
+    # Maximum motor-off recovery time after a missing echo, in milliseconds.
+    range_retry_ms: 800
+    # Consecutive valid readings agreeing on forward/turn clearance before recovery.
+    range_good_reads: 2
     # Maximum exploration time per start/resume; then stop and finish, in seconds.
     duration_s: 120
   # Motor speed percent for route legs.

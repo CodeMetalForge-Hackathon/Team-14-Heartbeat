@@ -66,7 +66,7 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 | boot | `READY rover v1` |
 | `PING` | `PONG rover v1` |
 | `RANGE <port>` | `RANGE port=<port> cm=<distance> valid=<0/1>`; stationary only |
-| `NAVCFG <port> <stop_cm> <clear_cm> <step_cm> <turn_deg> <max_turns> <poll_ms> <settle_ms> <turn_clearance_cm>` | `OK NAVCFG ...`; validated settings, stationary only, RAM only |
+| `NAVCFG <port> <stop_cm> <clear_cm> <step_cm> <turn_deg> <max_turns> <poll_ms> <settle_ms> <turn_clearance_cm> <range_retry_ms> <range_good_reads>` | `OK NAVCFG ...`; validated settings, stationary only, RAM only |
 | `EXPLORE <seconds> <speed_pct>` | `OK EXPLORE <seconds>` only when the bounded period ends; STOP cancels it |
 | `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached within tolerance; negative distance reverses |
 | `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached within tolerance; in-place turn |
@@ -148,7 +148,7 @@ write produces `ERR eeprom` and leaves motor output zero.
 
 The sketch uses the official `MeEncoderOnBoard` direct PWM API and encoder
 interrupts. It takes atomic snapshots of the AVR's 32-bit pulse counters and
-stops each wheel independently at its measured target. It does not hold position
+stops each wheel independently at its measured target for bounded moves. It does not hold position
 with PID after a move. Normal output rises at a bounded rate. Straight drives and exploration turns
 retain requested power through the final approach: the earlier distance slowdown
 caused observed low-PWM stalls. Standalone TURN keeps its original slowdown.
@@ -169,7 +169,10 @@ The following are fixed firmware safety bounds or board facts, rather than route
 tunables: the command ceilings, 20 ms control interval, 240 PWM units/second slew
 bound, 25 PWM-unit friction floor from Makeblock's `PWM_MIN_OFFSET`, 1.5 second
 communication watchdog, 1.5 second per-wheel encoder stall guard, and 30 second
-absolute move deadline. A wrong encoder direction beyond two pulses also stops
+absolute move/checkpoint deadline. During continuous exploration, the deadline
+renews only after both wheels actually pass an encoder checkpoint; the per-wheel
+stall timers never reset merely because a checkpoint rolled over. A wrong
+encoder direction beyond two pulses also stops
 the move. The host profile chooses speed and calibration within these bounds;
 it can apply stricter limits.
 
@@ -253,12 +256,25 @@ comes from YAML through NAVCFG; there is no movement or retained navigation mode
 on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is now on 6. Port 9's
 line sensor is not used. EXPLORE requires configuration and lasts 1–600 seconds.
 It emits `NAV FORWARD <cm>`, `NAV TURN <cm>`, and `NAV OBSTACLE <cm>` progress lines.
-Internal DRIVE/TURN steps do not emit completion acknowledgements. STOP cancels
+Forward exploration now rolls encoder checkpoints without cutting motor power;
+turns still finish and settle before a fresh front reading. Internal movement
+does not emit completion acknowledgements. STOP cancels
 the entire exploration transaction and prevents a delayed OK EXPLORE reply.
 
 Unknown echo, blocked search, overly close front obstacle, motor stall, wrong
-encoder direction and lost heartbeat all disable outputs. The front sensor
-does not establish side clearance during turns and cannot detect drops.
+encoder direction and lost heartbeat all disable outputs. Unknown echo enters a
+bounded motor-off retry (`NAV SENSOR_WAIT -1`) instead of immediately aborting.
+Two agreeing valid readings (profile default) produce `NAV SENSOR_READY <cm>`;
+the fresh distance then determines forward/turn/too-close behavior. Invalid
+readings reset recovery agreement, never its deadline. Expiry produces
+`ERR range_unknown`. STOP/heartbeat loss/overall expiry cancel recovery.
+
+NAVCFG has eleven arguments; its last two settings are the retry duration
+(200–5000 ms) and required valid-reading count (2–5). The retry duration must
+exceed settling plus poll time for all required readings plus the 24 ms echo
+timeout. Host and firmware enforce the same bounds. Older nine-argument NAVCFG
+is rejected so a partial upgrade cannot enable incompatible motion behavior.
+The front sensor does not establish side clearance during turns or detect drops.
 
 ## Restore the Ranger's original firmware
 

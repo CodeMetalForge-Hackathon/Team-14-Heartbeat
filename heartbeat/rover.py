@@ -28,7 +28,8 @@ def _finite(value, name: str) -> float:
 
 
 NAVIGATION_KEYS = ("sensor_port", "stop_cm", "clear_cm", "step_cm", "turn_deg",
-                   "max_turns", "poll_ms", "settle_ms", "turn_clearance_cm")
+                   "max_turns", "poll_ms", "settle_ms", "turn_clearance_cm",
+                   "range_retry_ms", "range_good_reads")
 
 
 def navigation_args(settings):
@@ -37,13 +38,15 @@ def navigation_args(settings):
         values = tuple(_finite(settings[key], key) for key in NAVIGATION_KEYS)
     except (KeyError, TypeError) as exc:
         raise ValueError("Missing rover navigation settings") from exc
-    port, stop, clear, step, turn, tries, poll, settle, clearance = values
+    port, stop, clear, step, turn, tries, poll, settle, clearance, retry, good = values
     if (port not in range(6, 11) or not 20 <= stop <= 100 or not stop + 5 <= clear <= 200
             or not 1 <= step <= 30 or not 15 <= turn <= 90
             or not tries.is_integer() or not 1 <= tries <= 16
             or not poll.is_integer() or not 60 <= poll <= 200
             or not settle.is_integer() or not 100 <= settle <= 1000
-            or not 5 <= clearance < stop):
+            or not 5 <= clearance < stop or not retry.is_integer() or not 200 <= retry <= 5000
+            or not good.is_integer() or not 2 <= good <= 5
+            or retry <= settle + poll * good + 24):
         raise ValueError("Invalid rover navigation settings")
     return values
 
@@ -69,7 +72,7 @@ def parse_reply(line: str | bytes) -> dict:
         return {"kind": "ERR", "reason": " ".join(words[1:]), "raw": raw}
     if kind == "OK" and len(words) >= 2:
         command = words[1]
-        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1, "NAVCFG": 9, "LED": 3, "CAL": 2}
+        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1, "NAVCFG": 11, "LED": 3, "CAL": 2}
         if command not in counts or len(words) != counts[command] + 2:
             raise ValueError(f"Malformed rover acknowledgement: {raw}")
         try:
@@ -85,7 +88,9 @@ def parse_reply(line: str | bytes) -> dict:
         return {"kind": "OK", "command": command, "args": args, "raw": raw}
     if kind == "NAV" and len(words) == 3:
         cm = float(words[2])
-        if words[1] not in {"FORWARD", "TURN", "OBSTACLE"} or not math.isfinite(cm) or not 2 <= cm <= 400:
+        valid_distance = cm == -1 if words[1] == "SENSOR_WAIT" else 2 <= cm <= 400
+        if (words[1] not in {"FORWARD", "TURN", "OBSTACLE", "SENSOR_WAIT", "SENSOR_READY"}
+                or not math.isfinite(cm) or not valid_distance):
             raise ValueError("Invalid navigation observation")
         return {"kind": "NAV", "state": words[1], "cm": cm, "raw": raw}
     if kind == "RANGE" and len(words) == 4:
@@ -189,7 +194,7 @@ class _Commands:
 
     def _validate(self, command: str, args: tuple) -> tuple:
         count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0,
-                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "NAVCFG": 9, "RANGE": 1, "LED": 3, "CAL": 2}
+                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "NAVCFG": 11, "RANGE": 1, "LED": 3, "CAL": 2}
         if command not in count or len(args) != count[command]:
             raise ValueError("Invalid rover command")
         numbers = tuple(_finite(value, command) for value in args)

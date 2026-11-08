@@ -16,14 +16,16 @@ from test_rover import Serial, make_link
 
 @pytest.mark.parametrize("line", ["RANGE port=10 cm=100.00 valid=1", "RANGE port=10 cm=-1.00 valid=0",
                                   "NAV TURN 25.00", "NAV OBSTACLE 30.00", "OK EXPLORE 120",
-                                  "OK NAVCFG 10 30 45 20 45 8 80 200 15"])
+                                  "NAV SENSOR_WAIT -1.00", "NAV SENSOR_READY 100.00",
+                                  "OK NAVCFG 10 30 45 20 45 8 80 200 15 800 2"])
 def test_protocol_additions(line):
     assert parse_reply(line)["raw"] == line
 
 
 @pytest.mark.parametrize("line", ["RANGE port=1 cm=100 valid=1", "RANGE port=10 cm=nan valid=1",
                                   "RANGE port=10 cm=-1 valid=1", "RANGE port=10 cm=100 valid=0",
-                                  "NAV FORWARD -1", "NAV FLY 50", "OK NAVCFG 1 30 45 20 45 8 80 200 15"])
+                                  "NAV FORWARD -1", "NAV FLY 50", "NAV SENSOR_WAIT 100",
+                                  "NAV SENSOR_READY -1", "NAV SENSOR_WAIT nan", "OK NAVCFG 1 30 45 20 45 8 80 200 15 800 2"])
 def test_bad_navigation_replies(line):
     with pytest.raises(ValueError):
         parse_reply(line)
@@ -31,7 +33,9 @@ def test_bad_navigation_replies(line):
 
 @pytest.mark.parametrize("change", [{"sensor_port": 1}, {"sensor_port": True}, {"poll_ms": 1000},
                                      {"clear_cm": 30}, {"max_turns": 2.5}, {"step_cm": 100},
-                                     {"turn_clearance_cm": 30}, {"turn_deg": 180}])
+                                     {"turn_clearance_cm": 30}, {"turn_deg": 180}, {"range_retry_ms": 300},
+                                     {"range_retry_ms": 5001}, {"range_good_reads": 1},
+                                     {"range_good_reads": 6}, {"range_good_reads": 2.5}])
 def test_navigation_limits(change):
     cfg = {**load_profile().rover["navigation"], **change}
     with pytest.raises(ValueError):
@@ -171,3 +175,20 @@ def test_explore_acknowledgement_completes_only_matching_duration(make_link):
         assert result == [True] and not link.moving
     finally:
         link.close(); worker.join(1)
+
+
+def test_old_navigation_acknowledgement_cannot_authorize_new_settings():
+    with pytest.raises(ValueError):
+        parse_reply("OK NAVCFG 6 30 45 20 45 8 80 200 15")
+
+
+def test_console_describes_unknown_range_as_stopped():
+    from heartbeat.cli import _DialogConsole
+    from contextlib import redirect_stdout
+    from io import StringIO
+    output=StringIO()
+    bus=EventBus();bus.subscribe(_DialogConsole())
+    with redirect_stdout(output):
+        bus.publish("rover",1,reply=parse_reply("NAV SENSOR_WAIT -1"))
+    assert "motors stopped; retrying distance sensor" in output.getvalue()
+    assert "front -1" not in output.getvalue()

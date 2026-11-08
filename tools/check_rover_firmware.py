@@ -30,7 +30,7 @@ constexpr int A4=4, LOW=0, HIGH=1, INPUT=0, OUTPUT=1, RISING=1;
 constexpr int SLOT1=1, SLOT2=2, DIRECT_MODE=0;
 constexpr int WGM10=0, CS11=1, WGM12=2, WGM21=3, WGM20=4, CS21=5;
 int TCCR1A=0,TCCR1B=0,TCCR2A=0,TCCR2B=0;
-unsigned long testMillis=10000, testEcho=5800, testedTimeout=0;
+unsigned long testMillis=10000, testEcho=5800, testedTimeout=0, testPulseDelayMs=0;
 int testedPin=-1;
 unsigned long millis(){return testMillis;}
 void pinMode(int,int){}
@@ -38,14 +38,14 @@ void digitalWrite(int,int){}
 int digitalRead(int){return 0;}
 int analogRead(int){return 512;}
 void delayMicroseconds(int){}
-unsigned long pulseIn(int pin,int,unsigned long timeout){testedPin=pin;testedTimeout=timeout;return testEcho;}
+unsigned long pulseIn(int pin,int,unsigned long timeout){testedPin=pin;testedTimeout=timeout;testMillis+=testPulseDelayMs;return testEcho;}
 void attachInterrupt(int,void(*)(),int){}
 struct Port { uint8_t s1=0,s2=0; };
 Port mePort[17];
 struct MeEncoderOnBoard {
- long position=0; int pwm=0;
+ long position=0; int pwm=0, zeroWrites=0;
  explicit MeEncoderOnBoard(int){}
- void setMotorPwm(int p){pwm=p;}
+ void setMotorPwm(int p){pwm=p;if(p==0)++zeroWrites;}
  void setMotionMode(int){}
  void pulsePosMinus(){--position;}
  void pulsePosPlus(){++position;}
@@ -93,10 +93,10 @@ void command(const char *value){
 }
 void off(){assert(!moving && !exploring && leftMotor.pwm==0 && rightMotor.pwm==0);}
 void reset(){
- stopMotors();navigationConfigured=false;testMillis=10000;testEcho=5800;
+ stopMotors();navigationConfigured=false;testMillis=10000;testEcho=5800;testPulseDelayMs=0;
  leftMotor.position=rightMotor.position=0;navigationTurns=0;Serial.clear();
 }
-void configure(){command("NAVCFG 10 30 45 20 45 8 80 200 15");assert(navigationConfigured);}
+void configure(){command("NAVCFG 10 30 45 20 45 8 80 200 15 800 2");assert(navigationConfigured);}
 void start(){configure();command("EXPLORE 120 30");assert(exploring && !moving);Serial.clear();}
 void tick(unsigned long ms){testMillis+=ms;lastCommandMs=testMillis;loop();}
 void completeSegment(){
@@ -129,7 +129,7 @@ int main(){
  // Reject motor-power ports, missing config, and unsafe navigation parameters.
  reset();command("RANGE 1");off();assert(Serial.out.str()=="ERR range_port\n");
  reset();command("EXPLORE 120 30");off();assert(Serial.out.str()=="ERR navigation_not_configured\n");
- reset();command("NAVCFG 10 30 20 20 45 8 80 200 15");off();assert(!navigationConfigured);
+ reset();command("NAVCFG 10 30 20 20 45 8 80 200 15 800 2");off();assert(!navigationConfigured);
  reset();configure();command("EXPLORE 601 30");off();
  // Forward -> obstacle STOP -> settled turn -> clear forward. No internal move ACKs.
  reset();start();tick(199);assert(!moving);tick(1);assert(moving && leftMotor.pwm==0);tick(20);
@@ -147,10 +147,64 @@ int main(){
  for(char c:std::string("STOP\n"))Serial.input.push_back(c);
  loop();off();tick(1000);off();assert(Serial.out.str().find("OK STOP")!=std::string::npos);
  assert(Serial.out.str().find("OK EXPLORE")==std::string::npos);
- // Missing echo never becomes permission to drive, at startup or mid-movement.
- reset();start();testEcho=0;tick(200);off();assert(Serial.out.str()=="ERR range_unknown\n");
- reset();start();tick(200);testEcho=0;Serial.clear();tick(80);off();
- assert(Serial.out.str()=="ERR range_unknown\n");
+ // Forward checkpoints never write zero power, even if one wheel arrives first.
+ reset();start();tick(200);tick(20);Serial.clear();
+ int zeroLeft=leftMotor.zeroWrites,zeroRight=rightMotor.zeroWrites;
+ leftMotor.position=startLeft+targetPulses*leftDirection;
+ rightMotor.position=startRight+(targetPulses-10)*rightDirection;
+ tick(20);assert(moving && navigationPhase==NAV_FORWARD && leftMotor.pwm<0 && rightMotor.pwm>0);
+ assert(startLeft==0); // Wait for both encoder checkpoints before rebasing.
+ rightMotor.position=startRight+targetPulses*rightDirection;tick(20);
+ assert(startLeft==leftMotor.position && startRight==rightMotor.position);
+ assert(leftMotor.zeroWrites==zeroLeft && rightMotor.zeroWrites==zeroRight);
+ assert(Serial.out.str().empty());
+ // Continuous travel can cross the old 30 s segment deadline with real encoder progress.
+ for(int i=0;i<40;i++){
+   leftMotor.position+=targetPulses*leftDirection;rightMotor.position+=targetPulses*rightDirection;
+   tick(1000);assert(moving && navigationPhase==NAV_FORWARD);
+ }
+ assert(leftMotor.zeroWrites==zeroLeft && rightMotor.zeroWrites==zeroRight);
+ command("STOP");off();
+ // Passing one checkpoint never exempts a wheel from the stall guard.
+ reset();start();tick(200);
+ leftMotor.position=startLeft+targetPulses*2*leftDirection;
+ tick(1500);off();assert(Serial.out.str().find("ERR stall slots=2")!=std::string::npos);
+ // Missing echo cuts power immediately and keeps it off while retrying.
+ reset();start();tick(200);tick(20);testEcho=0;Serial.clear();tick(80);
+ assert(!moving && exploring && navigationPhase==NAV_RETRY && leftMotor.pwm==0 && rightMotor.pwm==0);
+ assert(Serial.out.str()=="NAV SENSOR_WAIT -1.00\n");
+ testEcho=100*58;tick(199);assert(!moving && navigationGoodReads==0);
+ tick(1);assert(!moving && navigationGoodReads==1);
+ tick(80);assert(moving && navigationPhase==NAV_FORWARD && leftMotor.pwm==0);
+ assert(Serial.out.str().find("NAV SENSOR_READY 100.00")!=std::string::npos);
+ tick(20);assert(leftMotor.pwm<0 && rightMotor.pwm>0); // gradual restart
+ // Persistent loss aborts without restarting, both at startup and while cruising.
+ reset();start();testEcho=0;tick(200);assert(exploring && !moving);tick(800);off();
+ assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ reset();start();tick(200);testEcho=0;tick(80);tick(800);off();
+ assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ // Valid readings must be consecutive and agree on whether forward clearance exists.
+ reset();start();testEcho=0;tick(200);testEcho=100*58;tick(200);assert(!moving);
+ testEcho=0;tick(80);assert(navigationGoodReads==0);
+ testEcho=100*58;tick(80);assert(!moving);testEcho=25*58;tick(80);assert(!moving);
+ tick(80);assert(moving && navigationPhase==NAV_TURN);command("STOP");off();
+ // STOP or duration expiry during retry cannot be undone by a later valid echo.
+ reset();start();testEcho=0;tick(200);command("STOP");off();testEcho=100*58;tick(500);off();
+ reset();configure();command("EXPLORE 1 30");tick(200);testEcho=0;tick(80);
+ testEcho=100*58;Serial.clear();tick(720);off();assert(Serial.out.str()=="OK EXPLORE 1\n");
+ // A valid echo that arrives after the recovery deadline cannot restart motors.
+ reset();start();testEcho=0;tick(200);testEcho=100*58;tick(200);assert(!moving);
+ testMillis=navigationRetryStartMs+navigationRetryMs-10;lastCommandMs=testMillis;
+ testPulseDelayMs=20;loop();off();assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ // Too-close recovery is stopped, not treated as permission to turn.
+ reset();start();testEcho=0;tick(200);testEcho=10*58;tick(200);tick(80);off();
+ assert(Serial.out.str().find("ERR obstacle_too_close")!=std::string::npos);
+ // Recovery never bypasses the heartbeat watchdog.
+ reset();start();testEcho=0;tick(200);testMillis+=1500;loop();off();
+ assert(Serial.out.str().find("ERR watchdog")!=std::string::npos);
+ // Older nine-field settings fail closed, without enabling exploration.
+ reset();command("NAVCFG 10 30 45 20 45 8 80 200 15");off();assert(!navigationConfigured);
+ reset();command("NAVCFG 10 30 45 20 45 8 80 200 15 200 2");off();assert(!navigationConfigured);
  // Too-close front obstacle cannot initiate a turn; bounded search stops if boxed in.
  reset();start();testEcho=10*58;tick(200);off();assert(Serial.out.str()=="ERR obstacle_too_close\n");
  reset();start();testEcho=25*58;
@@ -174,7 +228,7 @@ int main(){
  Serial.clear();tick(1500);off();assert(Serial.out.str().find("ERR stall slots=2")==0);
  // Other motor/config commands cannot hijack an active exploration in its waiting phase.
  reset();start();command("DRIVE 10 30");off();assert(Serial.out.str()=="ERR busy\n");
- reset();start();command("NAVCFG 10 30 45 20 45 8 80 200 15");off();
+ reset();start();command("NAVCFG 10 30 45 20 45 8 80 200 15 800 2");off();
  assert(Serial.out.str()=="ERR busy\n");
 }
 """

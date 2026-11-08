@@ -155,7 +155,9 @@ drops, side/rear obstacles, or every reflective/absorbent surface. Start on a
 level, unobstructed supervised test area with cable slack and access to STOP.
 
 Upload the updated `firmware/rover` first, using the build/upload instructions in
-its README. An older sketch rejects the new commands and patrol remains stopped.
+its README. NAVCFG now includes the recovery timeout and valid-reading count;
+older firmware/settings are rejected and patrol remains stopped. Update both
+the host code and flashed sketch before testing this version.
 The straight-drive constant-power experiment is now part of this firmware.
 Exploration turns also retain their requested power until encoder completion;
 startup slew, target tolerance, stall guard and watchdog remain active. Actual
@@ -178,14 +180,27 @@ Leave the CLAP service running with `profiles/clap-knocks.yaml`. Then run:
 uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 6 --explore-seconds 120 --knocker manual --dashboard --port 8001
 ```
 
-The rover waits 200 ms, measures in front, and starts a 20 cm forward segment
-only with at least 45 cm clearance. It checks every 80 ms while moving forward;
-a reading at/below 30 cm cuts motor power before requesting a turn. It then waits
+The rover waits 200 ms, measures in front, and starts continuous forward travel
+only with at least 45 cm clearance. The 20 cm encoder checkpoints roll forward
+without stopping the motors, restarting their ramp, or emitting repeated
+`NAV FORWARD` lines. They retain bounded progress/deadline checks; a wheel that
+passes a checkpoint is still monitored for stalls while the other catches up.
+Front readings use an 80 ms poll interval plus the bounded echo acquisition time.
+A reading at/below 30 cm cuts motor power before requesting a turn. It then waits
 and turns 45 degrees in place, repeating until a reading permits forward travel.
 Eight unsuccessful turns produce a stopped `navigation_blocked` error. A front
-obstacle closer than 15 cm prevents even a turn (`obstacle_too_close`). A missing
-echo produces a stopped `range_unknown` error, never permission to drive.
-Front range is not used to assess side clearance during a turn.
+obstacle closer than 15 cm prevents even a turn (`obstacle_too_close`).
+
+A missing echo immediately cuts motor power and reports `NAV SENSOR_WAIT`.
+The controller retries while stopped for up to 800 ms, allowing 200 ms to settle.
+It requires two consecutive valid readings agreeing on whether forward clearance
+exists. A missing reading or a change between open/blocked resets that agreement.
+`NAV SENSOR_READY` reports recovery, then the fresh distance determines forward
+travel, a search turn, or a too-close stop. Restart uses the normal gradual ramp.
+If recovery fails, `range_unknown` aborts. STOP, a knock-triggered STOP, watchdog,
+and exploration expiry cancel recovery; later echoes cannot restart it. These
+settings are `range_retry_ms` and `range_good_reads` in YAML. Front range is not
+used to assess side clearance during a turn.
 
 All these parameters live under `rover.navigation` in the profile and are sent
 to the controller before movement. Firmware rejects values outside fixed bounds.
