@@ -522,3 +522,43 @@ def test_rover_api_requires_patrol_session(tmp_path):
     with TestClient(app) as client:
         response = client.post("/api/rover", json={"name": "stop"})
         assert response.status_code == 400 and "patrol" in response.json()["detail"]
+
+
+def test_startup_retries_lost_ping_before_sending_a_move(make_link):
+    class BootingSerial(Serial):
+        def write(self, payload):
+            if payload == b"PING\n" and self.writes.count("PING") < 2:
+                self.writes.append("PING")
+                self.push("READY rover v1")
+                return len(payload)
+            return super().write(payload)
+
+    link, serial = make_link(BootingSerial(), cfg={"connect_retry_s": .02})
+    assert link.drive(10)
+    assert serial.writes == ["PING", "PING", "PING", "DRIVE 10 30"]
+    assert not link.estopped
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_startup_deadline_refuses_motion_without_pong(make_link, ready):
+    class UnresponsiveSerial(Serial):
+        def write(self, payload):
+            self.writes.append(payload.decode().strip())
+            if ready:
+                self.push("READY rover v1")
+            return len(payload)
+
+    link, serial = make_link(UnresponsiveSerial(),
+                             cfg={"connect_timeout_s": .08, "connect_retry_s": .02})
+    started = time.monotonic()
+    assert not link.drive(10)
+    assert time.monotonic() - started < 1
+    assert len(serial.writes) >= 2 and set(serial.writes) == {"PING"}
+    assert not serial.is_open
+
+
+def test_startup_retries_do_not_retry_a_failed_motion(make_link):
+    link, serial = make_link(Serial(motion_reply=False), cfg={"connect_retry_s": .02})
+    assert not link.drive(10)
+    assert serial.writes.count("DRIVE 10 30") == 1
+    assert "STOP" in serial.writes

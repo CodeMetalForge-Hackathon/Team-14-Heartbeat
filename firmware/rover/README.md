@@ -32,6 +32,13 @@ Use the actual port shown by `board list`; a Pi usually uses `/dev/ttyUSB0` or
 `/dev/ttyACM0`. Uploading or opening USB serial may reset the Auriga. The sketch
 boots with motor output zero, the ring off, and exactly `READY rover v1`.
 
+The host retries identity PING on the same connection every 0.25 seconds, up
+to a five-second startup deadline (`rover.connect_retry_s` and
+`rover.connect_timeout_s`). This tolerates the AVR bootloader discarding an
+early request after USB opens. Only `PONG rover v1` completes the handshake;
+READY alone, silence, or another firmware's identity never authorizes a move.
+Movement commands are not retried automatically.
+
 For first movement checks, support the chassis with the tracks off the ground.
 Keep its power switch accessible. Check `ping`, `status`, `stop`, and a small
 movement before placing it on a flat test surface. The motor battery supply must

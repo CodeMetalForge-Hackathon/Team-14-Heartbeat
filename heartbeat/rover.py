@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 import math
 import threading
+from time import monotonic
 from typing import Callable
 
 from .config import load_profile
@@ -81,6 +82,7 @@ class RoverConfig:
     read_timeout_s: float
     write_timeout_s: float
     connect_timeout_s: float
+    connect_retry_s: float
     command_timeout_s: float
     move_timeout_s: float
     heartbeat_s: float
@@ -366,7 +368,21 @@ class RoverLink(_Commands):
                 self._reader = threading.Thread(target=self._read_loop, args=(connection,), daemon=True,
                                                 name="rover-replies")
                 self._reader.start()
-                self._perform("PING", (), self.cfg.connect_timeout_s)
+                # Opening USB can restart the AVR. Its bootloader may discard
+                # the first PING, so retry identity only on this same connection.
+                # READY alone never authorizes movement. Command writes and
+                # motor operations are not retried by this handshake.
+                deadline = monotonic() + self.cfg.connect_timeout_s
+                while True:
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Rover timed out waiting for PING during startup")
+                    try:
+                        self._perform("PING", (), min(self.cfg.connect_retry_s, remaining))
+                        break
+                    except TimeoutError:
+                        if monotonic() >= deadline:
+                            raise
             except Exception:
                 self._disconnect()
                 raise
