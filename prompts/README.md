@@ -14,6 +14,12 @@ Run two Codex sessions in parallel. They never edit the same files.
 
 **Lane C** (third session, in parallel): **FIX-01**, dialog noise guards and fast-knock features, from the P03/P05 review.
 
+**Demo hardening** (Saturday evening; the two can run in parallel because they touch different files):
+- **CLAP-05:** a CLAP failure degrades to the heuristic instead of stopping the session.
+- **EVAL-01:** a scorecard on the real stick recordings. Run it on the laptop that has `data/raw/`.
+
+The hookup guide is `docs/DEMO-HOOKUP.md`.
+
 Later prompts get written after we see these results:
 
 - P09: LoRa link, or a wireless (Wi-Fi) stick node
