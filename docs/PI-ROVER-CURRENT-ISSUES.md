@@ -372,6 +372,134 @@ remains missing: reliable PONG/STOP, `CAPS guarded=1 cruise=1`, lifted motion
 and interruption checks, and battery voltage during load. Root cause remains
 unproven. No claim of a half-written sketch or bootloader damage is made.
 
+## PI-04 recovery on the replacement Pi (PI-05)
+
+New-host observations on 2026-11-08, starting at 04:08 EST, from a fresh
+clone of `main` at `19d3927` into `/home/teamrover/Team-14`. This is the
+replacement Pi, not a continuation of the old host's device identities.
+Recovery remains **pending**; no successful new-host rover communication,
+firmware upload, motion test or full pipeline run is established.
+
+### Host and setup
+
+- Raspberry Pi 5 Model B Rev 1.1, hostname `raspberrypi` (distinct from the
+  old `heartbeat` host), Debian 13/trixie arm64, kernel
+  `6.12.47+rpt-rpi-2712`.
+- Root is already on `/dev/nvme0n1p2`, ext4, with about 443 GiB available.
+  No storage formatting, boot configuration or accelerator changes were made.
+- GitHub CLI was installed and authenticated as `zukhriddingit`; the clone
+  uses HTTPS without credentials in its URL.
+- `bash scripts/pi_setup.sh` completed as `teamrover`. OS audio packages,
+  uv 0.13.7, Python 3.11.18 and the locked project dependencies including the
+  CPU ML extra were installed. The account already has audio/dialout access.
+  No motor-controller service was installed or enabled.
+- YAMNet downloaded and passed CPU inference with 15,600 float32 input
+  samples and 521 class scores (about 2.7 ms for the recorded extraction).
+  This checks inference, not live microphone recognition.
+- Both the bundled recovery HEX and firmware source match the SHA-256 values
+  in [the preserved artifact README](evidence/rover-recovery/README.md).
+  No old `/tmp` build was assumed to exist on this host.
+- `uv run pytest -q` passed **927 tests** in 144.26 seconds, with the existing
+  Starlette/httpx deprecation warning. The application tree remains `19d3927`;
+  the recovery record is a documentation-only change. The suite was run once.
+- The documented `scripts/clap_pi.sh` wrapper installed its separate Python
+  3.12.16 environment and CPU-only torch 2.9.1, cached
+  `laion/clap-htsat-unfused`, and started with `profiles/pi-full-check.yaml`.
+  `/health` returned the expected `heartbeat-clap-v1` contract (16 kHz,
+  15,600-sample clips, monitor enabled). Synthetic-silence `/classify` and
+  `/observe` calls returned finite scores: 10 scores in about 651 ms and 14
+  scores in about 704 ms respectively. These are one-off protocol/inference
+  checks, not recognition accuracy or sustained-throughput validation. The
+  service binds to `127.0.0.1:8767`; it is not a boot-enabled controller.
+- No `.env.local` exists in this fresh checkout. No credential was copied,
+  printed or committed, and no Decisions API call was made.
+
+### Read-only host checks and actual device inventory
+
+`lifescout.service` is absent (`not-found`, inactive). No LifeScout, patrol,
+serial diagnostic or uploader was found running. ModemManager is active;
+this alone does not establish port interference. The initial
+`vcgencmd get_throttled` returned `0x0`, and the initial inspected kernel log
+contained no matching under-voltage or over-current records. Physical
+wall-supply and battery condition are not established by these initial readings.
+
+**Later power fault:** after setup/inference checks, `get_throttled` returned
+`0x50000` at 04:12 EST and on recheck. Kernel records show `Undervoltage
+detected!` at 04:11:40 and 04:12:24, and `Voltage normalised` at 04:11:46 and
+04:12:28. Bits 16 and 18 record historical undervoltage and throttling;
+the sampled current-state bits are zero. See the official
+[get_throttled bit definitions](https://www.raspberrypi.com/documentation/computers/os.html#get_throttled).
+These are new-host faults, not evidence about Auriga battery voltage or the
+cause of the old serial failure. The operator was asked to confirm the
+official Raspberry Pi 27 W wall supply. PI-04's power gate is unresolved;
+do not proceed with hardware recovery based on the earlier `0x0` reading.
+
+At 04:10–04:12 EST, USB/sysfs enumeration showed:
+
+| Device | USB identity | Node | Physical path |
+| --- | --- | --- | --- |
+| M5Stick microphone | `0403:6001`, `Hades2001_M5stack_81520161EE` | `/dev/ttyUSB0` | `/dev/serial/by-path/platform-xhci-hcd.1-usbv2-0:1:1.0-port0` |
+| u-blox GPS | `1546:01a9` | `/dev/ttyACM0` | `/dev/serial/by-path/platform-xhci-hcd.0-usbv2-0:1:1.0` |
+| Auriga rover | Expected CH340 `1a86:7523` | **Absent** | **Not established** |
+
+These paths must be rechecked after replugging. In particular, `ttyUSB0`
+currently belongs to the microphone and must not receive rover commands or
+a firmware upload. No serial discovery/probing was performed.
+
+`timeout 10 rpicam-hello --list-cameras` reported `No cameras available!`.
+`aplay -l` listed only `vc4hdmi0` and `vc4hdmi1`; `arecord -l` listed no ALSA
+capture devices. The M5Stick uses serial transport, so the latter does not
+mean the stick microphone is faulty. No camera capture, audio capture or
+speaker playback was attempted. A camera ribbon check must be done with Pi
+power off. No GPIO/AI/audio overlays were copied from the old Pi.
+
+### Operator confirmation and link-test gate
+
+The operator initially said everything was connected and requested checks.
+Asked specifically for the isolated recovery setup, the operator then
+confirmed: "Ready: motors unplugged, rover alone; authorize PING". This
+authorizes the first bounded no-motion link test, not flashing or motion.
+However, USB still showed the microphone/GPS and no Auriga after that reply.
+The operator was asked to connect the Auriga with a USB data cable, keeping
+both motor leads unplugged. Physical isolation is operator-reported and USB
+isolation has not been verified.
+
+No rover port has been opened and no PING has been sent on this host because
+the authorized target is absent. No fuser check, CAPS/STOP/STATUS exchange,
+battery estimate, power cycle, upload or motion test has been reached.
+Battery freshness/charge, multimeter voltage, wiring inspection and removal
+of any wireless module remain unverified. There is no new evidence identifying
+the cause of the old rover fault.
+
+After the power gate is resolved and the isolated Auriga enumerates, identify
+its actual ttyUSB node, check
+`fuser -v ACTUAL_NODE`, then run the already authorized single
+`timeout 15 uv run --no-sync hb rover --port ACTUAL_NODE ping`. A successful
+PONG is required before CAPS/STOP/STATUS; a new port-opening step, power cycle,
+upload or lifted motion check still follows PI-04's operator confirmations.
+Keep the motor leads disconnected and do not start an armed patrol.
+
+Software-only readiness can be checked from `/home/teamrover/Team-14` with:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+curl --fail --max-time 5 http://127.0.0.1:8767/health
+vcgencmd get_throttled
+ls -l /dev/serial/by-id/ /dev/serial/by-path/
+```
+
+If the local CLAP process has been stopped, restart it in a separate terminal
+using the cached model (no `--allow-download` needed):
+
+```bash
+bash scripts/clap_pi.sh --profile profiles/pi-full-check.yaml
+```
+
+Firmware, profiles, Python code, contracts and boot settings are unchanged.
+Do not repeat the offline suite for this documentation update. PONG/CAPS/STOP,
+live microphone transport, a GPS fix, camera capture, speaker output, voltage
+under rover load and supervised full-pipeline behavior remain unverified here.
+
 ## Earlier validation scope
 
 The earlier full suite passed 920 tests before the continuous-mode change.
