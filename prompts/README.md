@@ -20,6 +20,9 @@ Run two Codex sessions in parallel. They never edit the same files.
 
 The hookup guide is `docs/DEMO-HOOKUP.md`.
 
+**Rover recovery** (Sunday early morning, on the Pi, operator at the rover):
+- **PI-04:** find out why the Auriga stopped answering and a track ran by itself. Checks power, the port and a possible competing service before **one** clean upload. Go/no-go is at 08:00.
+
 Later prompts get written after we see these results:
 
 - P09: LoRa link, or a wireless (Wi-Fi) stick node

@@ -30,6 +30,9 @@ Every Pi command runs from `~/Team-14`.
   - The servo alone can spike above that.
 - **The under-power symptom:** the stick or the knocker disconnects at the moment the servo knocks. You'll see errors in `hb run`, or a lightning-bolt warning in the Pi's log.
   - If you see it, use the wall supply or a powered hub.
+- **The rover's own battery:** put in fresh batteries before the demo.
+  - Check with `hb rover --port $ROVER status`. A fresh 6×AA pack reads about 9 V.
+  - On Nov 8 it read 7.9 V at rest and 6.8 V while driving with the tracks lifted. That's low enough to reset the board in the middle of a move.
 
 ## 2. The Grove speaker (once)
 1. With the Pi off, do the wiring from the table above.
@@ -62,6 +65,12 @@ Every Pi command runs from `~/Team-14`.
 3. If it's still harsh, put a **10 kΩ resistor** in series with the yellow wire, between the Pi's pin 32 and SIG. Ask the hardware table for one; it cuts the level and the high-frequency hiss.
 
 If no new card appears, send Claude the output of `aplay -l`. **The demo still works without the speaker:** the voice is skipped and the knocks continue.
+
+**Status on Nov 8:** the Pi check found only HDMI cards, and GPIO 12 was still an input, so steps 2–3 above hadn't taken effect yet. Even once they do, the Pi sends raw PWM, and the Grove amplifier may still sound harsh. Two easier ways to get a voice:
+- **An HDMI monitor or TV with speakers** at the demo table. Plug it into the Pi, then test with `aplay assets/voice/we_hear_you.wav`; no wiring needed.
+- **Run the stationary sentinel on the Mac**, which has its own speakers (section 8, "The Pi dies").
+
+**The knocker matters more than the voice.** Its knocks are the challenge the survivor copies. Plug the Seeeduino knocker into the Pi and check for `PONG knocker v1` at startup. The current Pi test commands use `--knocker manual`, which only prints the prompts.
 
 ## 3. Update the code
 ```bash
