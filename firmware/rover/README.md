@@ -65,8 +65,8 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 | --- | --- |
 | boot | `READY rover v1` |
 | `PING` | `PONG rover v1` |
-| `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached; negative distance reverses |
-| `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached; in-place turn |
+| `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached within tolerance; negative distance reverses |
+| `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached within tolerance; in-place turn |
 | `STOP` | `OK STOP`, after immediately setting both motor outputs to zero |
 | `HB` | No reply; refreshes the movement watchdog |
 | `STATUS` | `STATUS batt=<V> moving=<0/1> enc=<left>,<right>` |
@@ -146,6 +146,15 @@ with PID after a move. Normal output rises at a bounded rate and decreases
 through the final quarter of encoder travel. A friction floor capped by the
 requested speed keeps the final approach finite; each target still cuts output
 immediately. This is a simple motion ramp, not closed-loop matched wheel speed.
+
+Movement completion permits at most **two encoder pulses** of shortfall per
+motor, additionally capped at **1% of the requested pulse target**, rounded down.
+Targets below 100 pulses still require exact completion. This avoids a false
+stall when a nearly finished motor cannot overcome track friction at the final
+low PWM. At the fallback calibration, two pulses correspond to roughly 1.13 mm
+of commanded straight travel; this is encoder tolerance, not a claim of physical
+distance accuracy. Both motors must independently enter tolerance before success.
+A motor outside tolerance still has the same stall/watchdog/deadline protections.
 
 The following are fixed firmware safety bounds or board facts, rather than route
 tunables: the command ceilings, 20 ms control interval, 240 PWM units/second slew

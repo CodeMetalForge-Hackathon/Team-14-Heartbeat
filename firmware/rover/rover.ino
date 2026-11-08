@@ -29,6 +29,9 @@ const unsigned long STALL_MS = 1500;
 const unsigned long MAX_MOVE_MS = 30000;
 const unsigned long CONTROL_MS = 20;
 const float PWM_SLEW_PER_S = 240.0f;  // Fixed maximum rise/fall rate for ordinary moves.
+// Fixed completion-error ceilings: two encoder pulses AND at most 1% of a move.
+// Short moves below 100 pulses still require the exact encoder target.
+const long MAX_TARGET_ERROR_PULSES = 2;
 const int FRICTION_PWM = 25;  // Makeblock's PWM_MIN_OFFSET; capped by requested speed.
 const uint8_t MAX_LINE = 95;
 const uint8_t RX_BUDGET = 64;  // Bound work per loop so a serial flood cannot starve safety.
@@ -317,8 +320,15 @@ float rampPwm(float current, float desired, float maxChange) {
   return fmaxf(desired, current - maxChange);
 }
 
+bool targetReached(long progress) {
+  const long percentLimit = targetPulses / 100;
+  const long tolerance = percentLimit < MAX_TARGET_ERROR_PULSES
+      ? percentLimit : MAX_TARGET_ERROR_PULSES;
+  return progress >= targetPulses - tolerance;
+}
+
 float desiredPwm(long progress) {
-  if (progress >= targetPulses) return 0.0f;
+  if (targetReached(progress)) return 0.0f;
   // Reduce demand through the last quarter of the encoder distance. A bounded
   // friction floor avoids asymptotically approaching a target without reaching it.
   const float remaining = targetPulses - progress;
@@ -339,9 +349,9 @@ void updateMotion() {
   const long leftProgress = (left - startLeft) * leftDirection;
   const long rightProgress = (right - startRight) * rightDirection;
   if (leftProgress < -2 || rightProgress < -2) { fail(F("encoder_direction")); return; }
-  const bool leftDone = leftProgress >= targetPulses;
-  const bool rightDone = rightProgress >= targetPulses;
-  // Output zero immediately at each target, regardless of the normal ramp.
+  const bool leftDone = targetReached(leftProgress);
+  const bool rightDone = targetReached(rightProgress);
+  // Cut output inside the bounded target tolerance, before checking for stalls.
   if (leftDone) { leftPwm = 0.0f; leftMotor.setMotorPwm(0); }
   if (rightDone) { rightPwm = 0.0f; rightMotor.setMotorPwm(0); }
   if (leftDone && rightDone) {
