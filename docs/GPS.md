@@ -29,6 +29,38 @@ sentences, no invalid sentences, no fix, zero satellites, and exit code `2` as
 documented. Its 14 hardware-free parser checks passed as part of the full
 826-test suite.
 
+## Antenna-connected indoor recheck, 2026-11-08
+
+The operator connected a u-blox ANN-MB5-00-00 through an SMA-to-u.FL adapter.
+The operator confirmed the antenna was indoors away from a window and could
+not move it to an open-sky position during this check.
+
+- The first 60.37-second sample contained 722 valid sentences and zero invalid
+  sentences. GPS satellites reported in view rose from two to a maximum of
+  five. None were used in a position fix: quality 0, RMC V, HDOP 99.99.
+- An additional 60.29-second observation contained 723 valid sentences and
+  zero invalid sentences. GSV messages intermittently contained nonzero C/N0
+  measurements from GPS satellites, with sampled strongest signals around
+  18-26dB-Hz. At the end five GPS satellites had recent nonzero C/N0 reports.
+  The receiver still had no fix and zero satellites used for positioning.
+
+This establishes receiver communication and detectable satellite RF signals
+with the connected antenna. It does not establish reliable antenna power,
+adequate signal strength/geometry, position accuracy or an operational fix.
+Indoor attenuation is a plausible limitation; an outdoor check is still needed.
+
+The [ANN-MB5 datasheet](https://content.u-blox.com/sites/default/files/documents/ANN-MB5_Datasheet_UBX-22038811.pdf)
+specifies an active L1/L5 antenna with a 3.0-5.0V supply requirement. The carrier
+must provide suitable bias power through the RF feed; a mechanical adapter
+alone does not supply power. The NEO-M9N can use the antenna's L1 coverage;
+attaching a multiband antenna does not add L5 reception to the receiver.
+No antenna supply voltage was measured during this test.
+
+When placement is possible, put the antenna stationary with its top facing
+open sky and repeat the existing diagnostic. If acquisition still fails there,
+verify the exact carrier's antenna bias circuit and the SMA/u.FL connections.
+Both software readers exited and released the serial port after these tests.
+
 ## Repeat the check (human-operated)
 
 Connect the GNSS antenna required by the carrier board and provide a clear view

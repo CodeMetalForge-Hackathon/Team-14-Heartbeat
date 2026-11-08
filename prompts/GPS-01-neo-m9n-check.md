@@ -18,3 +18,12 @@ During diagnosis the operator confirmed no antenna was attached and asked
 whether one was needed. Explain the requirement and distinguish a possible
 onboard carrier antenna from an external antenna; do not claim positioning
 works from USB enumeration or valid no-fix messages.
+
+Follow-up antenna test request:
+
+> it's the ANN-MB5-00-00, i did connect it with that SMA to UFL adapter cable, test it pls
+
+The operator subsequently confirmed the antenna was indoors away from a
+window and could not move it during the test. Record measured reception and
+fix status without claiming that an indoor no-fix result validates or rules
+out an electrical antenna problem.
