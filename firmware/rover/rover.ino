@@ -100,6 +100,27 @@ void fail(const __FlashStringHelper *reason) {
   Serial.println(reason);
 }
 
+void failStall(unsigned long now, long leftProgress, long rightProgress,
+               bool leftStalled, bool rightStalled) {
+  // Capture the last commanded PWM, then cut power BEFORE any serial output.
+  const int pwmLeft = static_cast<int>(leftPwm) * leftDirection;
+  const int pwmRight = static_cast<int>(rightPwm) * rightDirection;
+  stopMotors();
+  // Extend the existing ERR reason; old hosts already preserve the entire line.
+  // Paired fields are SLOT1,SLOT2. Progress is direction-normalized pulse count.
+  Serial.print(F("ERR stall slots="));
+  if (leftStalled && rightStalled) Serial.print(F("1,2"));
+  else Serial.print(leftStalled ? 1 : 2);
+  Serial.print(F(" progress=")); Serial.print(leftProgress);
+  Serial.print(','); Serial.print(rightProgress);
+  Serial.print(F(" target=")); Serial.print(targetPulses);
+  Serial.print(F(" pwm=")); Serial.print(pwmLeft);
+  Serial.print(','); Serial.print(pwmRight);
+  Serial.print(F(" idle_ms=")); Serial.print(now - leftProgressMs);
+  Serial.print(','); Serial.print(now - rightProgressMs);
+  Serial.print(F(" elapsed_ms=")); Serial.println(now - moveStartMs);
+}
+
 bool calibrationValid(float value) {
   return isfinite(value) && value >= MIN_CALIBRATION && value <= MAX_CALIBRATION;
 }
@@ -329,8 +350,12 @@ void updateMotion() {
     Serial.println(moveValue);
     return;
   }
-  if ((!leftDone && now - leftProgressMs >= STALL_MS) ||
-      (!rightDone && now - rightProgressMs >= STALL_MS)) { fail(F("stall")); return; }
+  const bool leftStalled = !leftDone && now - leftProgressMs >= STALL_MS;
+  const bool rightStalled = !rightDone && now - rightProgressMs >= STALL_MS;
+  if (leftStalled || rightStalled) {
+    failStall(now, leftProgress, rightProgress, leftStalled, rightStalled);
+    return;
+  }
   if (now - lastControlMs < CONTROL_MS) return;
   // Do not turn a delayed loop into a large, sudden acceleration step.
   const float change = PWM_SLEW_PER_S * CONTROL_MS / 1000.0f;

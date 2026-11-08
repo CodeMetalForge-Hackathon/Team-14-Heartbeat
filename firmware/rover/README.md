@@ -169,6 +169,42 @@ opening detection. This USB watchdog is software protection, not a physical
 emergency power disconnect. Humans must verify stopping distance, motor wiring,
 direction, encoder operation, wheel slip, and the watchdog with the real rover.
 
+## Tracing a motor stall
+
+Updated firmware includes a diagnostic snapshot in the existing ERR reply:
+
+```text
+ERR stall slots=1 progress=163,177 target=177 pwm=29,0 idle_ms=1500,1540 elapsed_ms=3012
+```
+
+This is an illustrative example, not a measurement from the robot. Both motor
+outputs are disabled before printing. The 1.5-second stall limit and movement
+power settings are unchanged. Reflash the updated sketch to receive these fields;
+an old sketch continues to report only `ERR stall`.
+
+- `slots`: unfinished motor slots whose encoder stopped changing (1, 2, or both).
+- `progress`: SLOT1,SLOT2 encoder pulses since this movement began, normalized
+  to the requested direction. These are not centimeters or absolute positions.
+- `target`: required pulse count for each motor.
+- `pwm`: last commanded signed PWM for SLOT1,SLOT2, on a -255 to 255 scale.
+  This is commanded power, not measured torque/current. A completed motor has 0.
+- `idle_ms`: time since each encoder last changed. A completed motor can have a
+  large idle time without being stalled; use `slots` and `progress` together.
+- `elapsed_ms`: controller time since this move began, not the audio stream clock.
+
+Close patrol before a standalone test so only one process owns the serial port.
+On an unobstructed test surface, a human can capture a short movement:
+
+```bash
+uv run hb rover --port /dev/cu.YOUR_RANGER drive 10 --speed 30 2>&1 | tee /tmp/rover-drive-trace.log
+```
+
+The same detailed error is printed and recorded in `events.jsonl` during patrol.
+Progress near target with low PWM suggests the final approach may not overcome
+track friction. Zero progress on a motor needs a power/wiring/mechanical/encoder
+check. Encoder counts cannot distinguish a physically stuck motor from a failed
+encoder; observe the tracks as well. Do not infer a cause from `stall` alone.
+
 ## Sources and validation
 
 API and wiring references were inspected at official Makeblock commit

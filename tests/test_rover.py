@@ -562,3 +562,32 @@ def test_startup_retries_do_not_retry_a_failed_motion(make_link):
     assert not link.drive(10)
     assert serial.writes.count("DRIVE 10 30") == 1
     assert "STOP" in serial.writes
+
+
+@pytest.mark.parametrize("slots", ["1", "2", "1,2"])
+def test_detailed_stall_preserves_evidence_and_stops(make_link, slots):
+    reason = (f"stall slots={slots} progress=163,177 target=177 "
+              "pwm=29,0 idle_ms=1500,1540 elapsed_ms=3012")
+    line = "ERR " + reason
+    assert len(line) < rover.MAX_REPLY_BYTES
+    assert rover.parse_reply(line)["reason"] == reason
+    bus = EventBus()
+    events = []
+    bus.subscribe(events.append)
+    link, serial = make_link(Serial(motion_reply=False), bus=bus,
+                             cfg={"move_timeout_s": 2})
+    results = []
+    worker = threading.Thread(target=lambda: results.append(link.drive(10, 30)))
+    worker.start()
+    try:
+        assert serial.wait_command("DRIVE")
+        serial.push(line)
+        worker.join(1)
+        assert results == [False] and not link.moving
+        assert "STOP" in serial.writes
+        # The detailed line survives into the same events used by the black box.
+        assert any(e.type == "error" and e.data.get("message") == reason for e in events)
+        assert not any(e.data.get("line", "").startswith("OK DRIVE") for e in events)
+    finally:
+        link.close()
+        worker.join(1)
