@@ -26,6 +26,14 @@ While the chip resets or sits in its bootloader, its pins float, and a motor dri
    - Kernel logs show the rover's CH341 and the GPS dropping off USB.
    - On a supply that isn't 5 A, the Pi 5 limits all USB devices together to 600 mA.
 
+**Update after `376cfc8`:**
+- Nothing owned the rover's port, and `get_throttled` was `0x0`. Suspects 2 and 4 are now weak, but still check that `lifescout.service` isn't *enabled*.
+- The CH340 sends no bytes while we're passive, and only malformed bytes while we transmit, at every baud tried. That points at **the board itself**: its power or battery, its reset or clock, the UART lines between the CH340 and the MCU, or something attached to them (a Bluetooth module, a loose wire).
+- So steps 2 and 6 decide the most:
+  - **Step 2:** fresh battery plus a physical inspection.
+  - **Step 6:** the same test on the Mac. If the Mac sees the same garbage, the board is at fault.
+- **Keep both motor cables unplugged** until step 4 passes with a valid PONG.
+
 ## Rules
 - **The operator is at the rover the whole time:** tracks lifted off the table, a hand on the power switch.
 - **Ask the operator and wait for a yes** before every step that powers the board or opens its port.
