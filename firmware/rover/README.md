@@ -32,9 +32,9 @@ Use the actual port shown by `board list`; a Pi usually uses `/dev/ttyUSB0` or
 `/dev/ttyACM0`. Uploading or opening USB serial may reset the Auriga. The sketch
 boots with motor output zero, the ring off, and exactly `READY rover v1`.
 
-The host retries identity PING on the same connection every 0.25 seconds, up
-to a five-second startup deadline (`rover.connect_retry_s` and
-`rover.connect_timeout_s`). This tolerates the AVR bootloader discarding an
+The host retries identity PING on the same connection every 0.5 seconds, up
+to a four-second startup deadline (`rover.boot_ping_interval_s` and
+`rover.boot_timeout_s`), with an earlier retry when READY arrives. This tolerates the AVR bootloader discarding an
 early request after USB opens. Only `PONG rover v1` completes the handshake;
 READY alone, silence, or another firmware's identity never authorizes a move.
 Movement commands are not retried automatically.
@@ -256,6 +256,11 @@ comes from YAML through NAVCFG; there is no movement or retained navigation mode
 on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is now on 6. Port 9's
 line sensor is not used. EXPLORE requires configuration and lasts 1–600 seconds.
 It emits `NAV FORWARD <cm>`, `NAV TURN <cm>`, and `NAV OBSTACLE <cm>` progress lines.
+The default profile uses `turn_deg: 0`: stop at 30 cm or closer, hold without
+turning, and resume after settling plus two consecutive readings at least 45 cm.
+Blocked waiting counts toward the 60-second default exploration budget. All
+thresholds and timings still come from NAVCFG. Positive turn angles (15–90)
+retain the earlier search-turn mode; zero is an explicit forward-only request.
 Forward exploration now rolls encoder checkpoints without cutting motor power;
 turns still finish and settle before a fresh front reading. Internal movement
 does not emit completion acknowledgements. STOP cancels
@@ -265,7 +270,8 @@ Unknown echo, blocked search, overly close front obstacle, motor stall, wrong
 encoder direction and lost heartbeat all disable outputs. Unknown echo enters a
 bounded motor-off retry (`NAV SENSOR_WAIT -1`) instead of immediately aborting.
 Two agreeing valid readings (profile default) produce `NAV SENSOR_READY <cm>`;
-the fresh distance then determines forward/turn/too-close behavior. Invalid
+the fresh distance then determines forward travel or stationary waiting in
+forward-only mode (turn/too-close handling in search-turn mode). Invalid
 readings reset recovery agreement, never its deadline. Expiry produces
 `ERR range_unknown`. STOP/heartbeat loss/overall expiry cancel recovery.
 
@@ -274,6 +280,9 @@ NAVCFG has eleven arguments; its last two settings are the retry duration
 exceed settling plus poll time for all required readings plus the 24 ms echo
 timeout. Host and firmware enforce the same bounds. Older nine-argument NAVCFG
 is rejected so a partial upgrade cannot enable incompatible motion behavior.
+Older eleven-argument firmware that requires a positive turn angle also rejects
+the new zero angle. Flash this sketch before using the forward-only default;
+there is no host fallback to an unguarded drive or an automatic turn.
 The front sensor does not establish side clearance during turns or detect drops.
 
 ## Restore the Ranger's original firmware

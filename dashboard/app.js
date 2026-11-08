@@ -78,8 +78,7 @@
     if (patrol.estopped) return "E-STOP";
     return ({MOVING: "Exploring", STOPPING: "Waiting for STOP acknowledgement", SETTLING: "Settling",
       VERIFYING: "Verifying fresh audio", REVIEW: "Awaiting operator review", FAULT: "Motion fault — check rover",
-      LISTENING: "Challenge and response", PAUSED: "Paused", OBSERVING: "Taking an observation",
-      DECIDING: "Choosing the next action", HOLDING: "Holding position",
+      LISTENING: "Challenge and response", PAUSED: "Paused",
       REPORTING: "Recording result", DRAINING: "Finishing dialog", DONE: "Route complete",
       ABORTED: "Aborted", ESTOP: "E-STOP", IDLE: "Ready"})[patrol.state] || String(patrol.state || "Ready").replaceAll("_", " ");
   }
@@ -117,16 +116,6 @@
       : patrol.audio_stop_enabled ? "Audio investigation enabled" : "Scheduled listening stops"));
     const battery = patrol.battery;
     text("patrol-battery", typeof battery === "number" && Number.isFinite(battery) && battery >= 0 ? `${battery.toFixed(2)} V` : "—");
-    const decisions = patrol.decisions, decisionLine = byId("patrol-decisions");
-    decisionLine.hidden = !decisions;
-    if (decisions) {
-      const parts = [decisions.armed ? "Guarded movement enabled" : "Observation only · movement disabled"];
-      if (decisions.last_action) parts.push(decisions.last_action.replaceAll("_", " "));
-      if (typeof decisions.latency_s === "number") parts.push(`Decision ${decisions.latency_s.toFixed(2)}s`);
-      if (typeof decisions.front_cm === "number") parts.push(`Front ${decisions.front_cm.toFixed(1)} cm`);
-      if (decisions.reason) parts.push(decisions.reason);
-      decisionLine.textContent = parts.join(" · ");
-    }
     byId("patrol-arrival-warning").hidden = !patrol.arrival_unverified;
     const results = patrol.results || [], route = patrol.route || results.map(result => ({name: result.gap}));
     text("patrol-progress", `${results.length} of ${route.length} gaps recorded`);

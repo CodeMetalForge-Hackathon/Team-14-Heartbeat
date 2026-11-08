@@ -162,9 +162,10 @@ drops, side/rear obstacles, or every reflective/absorbent surface. Start on a
 level, unobstructed supervised test area with cable slack and access to STOP.
 
 Upload the updated `firmware/rover` first, using the build/upload instructions in
-its README. NAVCFG now includes the recovery timeout and valid-reading count;
-older firmware/settings are rejected and patrol remains stopped. Update both
-the host code and flashed sketch before testing this version.
+its README. NAVCFG includes the recovery timeout and valid-reading count, and
+now accepts a zero turn angle for forward-only operation. Older firmware rejects
+that zero angle and patrol remains stopped. Update both the host code and flashed
+sketch before running this mode.
 The straight-drive constant-power experiment is now part of this firmware.
 Exploration turns also retain their requested power until encoder completion;
 startup slew, target tolerance, stall guard and watchdog remain active. Actual
@@ -184,7 +185,7 @@ works. RANGE never starts the motors; do not run another serial owner beside it.
 Leave the CLAP service running with `profiles/clap-knocks.yaml`. Then run:
 
 ```bash
-uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 6 --explore-seconds 120 --knocker manual --dashboard --port 8001
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 6 --explore-seconds 60 --knocker manual --dashboard --port 8001
 ```
 
 The rover waits 200 ms, measures in front, and starts continuous forward travel
@@ -193,17 +194,26 @@ without stopping the motors, restarting their ramp, or emitting repeated
 `NAV FORWARD` lines. They retain bounded progress/deadline checks; a wheel that
 passes a checkpoint is still monitored for stalls while the other catches up.
 Front readings use an 80 ms poll interval plus the bounded echo acquisition time.
-A reading at/below 30 cm cuts motor power before requesting a turn. It then waits
-and turns 45 degrees in place, repeating until a reading permits forward travel.
-Eight unsuccessful turns produce a stopped `navigation_blocked` error. A front
-obstacle closer than 15 cm prevents even a turn (`obstacle_too_close`).
+A reading at/below 30 cm cuts motor power. The default `turn_deg: 0` keeps the
+rover stationary and continues reading the sensor; it does not turn or reverse.
+After the 200 ms settling interval, two consecutive readings of at least 45 cm
+resume forward travel. A smaller reading resets that count. If the rover starts
+with less than 45 cm clearance, it waits for the same clearance confirmation.
+The 30/45 cm thresholds prevent rapid start/stop cycling at one distance.
+
+The previous search-turn behavior remains an explicit profile option: a nonzero
+`turn_deg` from 15 through 90 enables turns. In that mode, eight unsuccessful
+turns produce `navigation_blocked`, and a front obstacle closer than 15 cm
+prevents a turn (`obstacle_too_close`). Leave the default zero angle for the
+requested straight-ahead stop/resume behavior.
 
 A missing echo immediately cuts motor power and reports `NAV SENSOR_WAIT`.
 The controller retries while stopped for up to 800 ms, allowing 200 ms to settle.
 It requires two consecutive valid readings agreeing on whether forward clearance
 exists. A missing reading or a change between open/blocked resets that agreement.
 `NAV SENSOR_READY` reports recovery, then the fresh distance determines forward
-travel, a search turn, or a too-close stop. Restart uses the normal gradual ramp.
+travel or a stationary obstacle wait (a search turn only if explicitly configured).
+Restart uses the normal gradual ramp.
 If recovery fails, `range_unknown` aborts. STOP, a knock-triggered STOP, watchdog,
 and exploration expiry cancel recovery; later echoes cannot restart it. These
 settings are `range_retry_ms` and `range_good_reads` in YAML. Front range is not
@@ -218,10 +228,21 @@ Console `NAV FORWARD`, `NAV OBSTACLE` and `NAV TURN` lines include front distanc
 and are recorded as `rover` events. CLAP keeps capturing in parallel. A classified
 knock cancels exploration, then follows SETTLING → VERIFYING → dialog → REVIEW.
 Resume after review starts a fresh exploration period at the current location.
-The two-minute default ends with motors off and DONE; it is not an endless loop.
+The one-minute default ends with motors off and DONE; it is not an endless loop.
 `--explore-seconds` supports 1–600 seconds. Pause, abort, E-STOP, serial faults,
 stall protection and the communication watchdog remain active. `--knocker manual`
 still requires an operator to deliver the printed challenge prompts.
+
+The Decisions API integration has been removed. This uses the earlier local
+ultrasonic controller with a new forward-only obstacle wait. No camera or OpenAI
+API key is required. The 60 seconds is a maximum exploration
+period, not a promise of uninterrupted forward travel: obstacles, unknown range,
+knocks and motor/encoder faults still stop or interrupt it. The previously
+observed range and encoder faults are not repaired by this software rollback.
+On Raspberry Pi, replace the Mac serial path above with the rover's actual
+`/dev/serial/by-id/...` path. For CLAP on the Pi, start
+`bash scripts/clap_pi.sh --profile profiles/clap-knocks.yaml --allow-download`
+and wait for `CLAP ready`; omit `--allow-download` once the model is cached.
 
 Software-only checks (the dry run simulates elapsed exploration, not geometry):
 
