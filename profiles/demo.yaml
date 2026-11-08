@@ -1,0 +1,15 @@
+# Stationary sentinel demo on the Pi: stick mic + speaker challenge knocks.
+# Inherits every omitted setting from rubble.yaml. No CLAP service needed.
+# Usage: uv run --no-sync hb run --device stick --knocker speaker --auto --profile demo --dashboard
+classifier:
+  # Rule-based scoring accepted 8 of 9 real stick answer knocks; CLAP accepted 2 (run ml-microphone-20261108-053700).
+  name: heuristic
+  # Accept a sound as a knock at or above this heuristic score (0-1).
+  threshold: 0.5
+dialog:
+  # Profile name included in dialog snapshots and the dashboard.
+  profile: demo
+  # Longer answer window: a live answer started 3.3 s late and its 2 s closing silence overran 6.4 s.
+  window_s: 8.5
+  # Latest first answer knock after the window opens; live survivors reacted in about 3.2-3.3 s.
+  response_start_max_s: 4.5
