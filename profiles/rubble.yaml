@@ -476,6 +476,10 @@ rover:
   audio_stop:
     # Opt in to automatic audio stops and operator review at every checked gap.
     enabled: false
+    # all accepts distress/phrase cues and knocks; knocks accepts classified knocks only.
+    trigger_mode: all
+    # Perform stationary checks at route checkpoints even without an audio trigger.
+    scheduled_listen: true
     # Fresh stationary audio collection period, after motor settling.
     verify_s: 8.0
     # Maximum age of a completed audio window when its result arrives.

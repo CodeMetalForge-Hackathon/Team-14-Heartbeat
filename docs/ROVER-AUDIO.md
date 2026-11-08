@@ -107,3 +107,33 @@ Hardware-free checks:
 uv run pytest -q tests/test_patrol.py tests/test_patrol_audio.py tests/test_audio_monitor.py
 uv run pytest -q
 ```
+
+
+## Stop to investigate knocks only
+
+Use `--profile clap-knocks` instead of `clap-distress` for the patrol. This
+profile is compatible with the existing CLAP distress service on port 8767;
+the service does not need restarting. Restart the patrol process to load it.
+For a fresh service, use `--profile profiles/clap-knocks.yaml` on the service too.
+
+One accepted knock classification requests STOP, followed by the usual
+two-second settle, eight-second verification, and operator review. Further
+accepted stationary knocks can initiate the existing challenge-response dialog.
+The classification cutoff is unchanged. This detects knock-like impacts, not
+necessarily human knocks; test motor noise and bumps on the actual rover.
+
+Vocal monitoring is disabled in the patrol client. Screams, speech, breathing,
+and help phrases do not trigger this mode. Route checkpoints advance without
+scheduled listening or review pauses. The bounded drive/turn commands still
+finish between segments, and the rover stops at the end of the route. Operator
+pause/E-STOP, communication faults, and firmware protections remain active.
+There is no automatic route repetition or ultrasonic obstacle avoidance.
+
+Human-operated command (Mac example):
+
+```bash
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --route profiles/route.yaml --knocker manual --dashboard --port 8001
+```
+
+After a knock investigation, Resume skips the interrupted route leg as before;
+it does not replay an unknown remaining distance.

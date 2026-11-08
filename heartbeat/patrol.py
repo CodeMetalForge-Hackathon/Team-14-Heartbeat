@@ -80,6 +80,14 @@ class Patrol:
         self.audio_enabled = self.audio_stop.get("enabled", False)
         if not isinstance(self.audio_enabled, bool):
             raise ValueError("rover.audio_stop.enabled must be boolean")
+        self.trigger_mode = self.audio_stop.get("trigger_mode", "all")
+        self.scheduled_listen = self.audio_stop.get("scheduled_listen", True)
+        if self.trigger_mode not in {"all", "knocks"}:
+            raise ValueError("rover.audio_stop.trigger_mode must be all or knocks")
+        if not isinstance(self.scheduled_listen, bool):
+            raise ValueError("rover.audio_stop.scheduled_listen must be boolean")
+        if not self.scheduled_listen and not self.audio_enabled:
+            raise ValueError("Disabling scheduled listening requires audio_stop.enabled")
         if self.audio_enabled:
             for key in ("verify_s", "max_age_s", "knock_window_s", "stop_timeout_s"):
                 value = self.audio_stop.get(key)
@@ -87,8 +95,8 @@ class Patrol:
                         or not math.isfinite(value) or value <= 0):
                     raise ValueError(f"rover.audio_stop.{key} must be positive and finite")
             count = self.audio_stop.get("knock_count")
-            if isinstance(count, bool) or not isinstance(count, int) or count < 2:
-                raise ValueError("rover.audio_stop.knock_count must be an integer >= 2")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("rover.audio_stop.knock_count must be an integer >= 1")
         for key in ("settle_s", "gap_timeout_s", "speed_pct"):
             value = self.cfg[key]
             if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -178,6 +186,8 @@ class Patrol:
         """
         data = event.data
         if event.type == "audio_observation":
+            if self.trigger_mode == "knocks":
+                return None
             if not data.get("possible_distress"):
                 return None
             if data.get("label") not in {"SCREAM", "SHOUT", "CRYING"} and not data.get("matched_phrases"):
@@ -397,7 +407,7 @@ class Patrol:
             return
         moves = self.route[self.gap_index]["moves"]
         if self._move_index >= len(moves):
-            self._submit("stop", (), "stopped")
+            self._submit("stop", (), "stopped" if self.scheduled_listen else "checkpoint")
             return
         command, value = moves[self._move_index]
         self._move_index += 1
@@ -452,13 +462,21 @@ class Patrol:
             if isinstance(ok, dict):
                 self.battery = ok.get("batt", ok.get("battery"))
                 self._emit_state(self.state)
-        elif ok is not True and completion in ("moved", "stopped"):
+        elif ok is not True and completion in ("moved", "stopped", "checkpoint"):
             self._error("rover operation failed; patrol stopped")
             self._fail()
         elif completion == "moved":
             self._next_move()
         elif completion == "stopped":
             self._begin_settle()
+        elif completion == "checkpoint":
+            # Queue advancement rather than recursively walking empty gaps.
+            # A candidate or operator STOP can invalidate this callback first.
+            self.pipeline.call_soon(lambda: self._advance_checkpoint(generation))
+
+    def _advance_checkpoint(self, generation):
+        if generation == self._generation and self.motion_allowed:
+            self._next_gap()
 
     def _begin_settle(self):
         self._deadline = self.pipeline.t + self.cfg["settle_s"]
