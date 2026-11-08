@@ -257,3 +257,15 @@ button[data-patrol-command="resume"] { background: #25493e; border-color: #64b79
   .patrol-buttons { width: 100%; }
   .patrol-buttons button { min-width: 0; flex: 1; }
 }
+
+.gps-panel { margin-bottom: 22px; }
+.map-note { color: var(--slate); font-size: 12px; line-height: 1.6; margin: 0 22px 18px; }
+.map-layout { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; padding: 0 22px 22px; }
+#map-location { font: 12px/1.7 var(--mono); overflow-wrap: anywhere; }
+#gps-map { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--ink); }
+#map-empty { min-height: 200px; display: grid; place-content: center; padding: 30px; border: 1px dashed var(--line); border-radius: 8px; color: var(--slate); line-height: 1.7; }
+.map-layout h3 { font-size: 15px; }
+#gps-findings { max-height: 400px; overflow-y: auto; }
+#gps-findings > div { padding: 12px 0; border-bottom: 1px solid var(--line); }
+#gps-findings p { font-size: 12px; color: var(--slate); line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 760px) { .map-layout { grid-template-columns: 1fr; } }

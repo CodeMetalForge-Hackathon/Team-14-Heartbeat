@@ -110,3 +110,53 @@ Hardware-free parsing checks:
 ```bash
 uv run pytest -q tests/test_gps_check.py
 ```
+
+
+## GPS on the patrol dashboard
+
+Start the normal patrol with `--gps-port auto` to select exactly one USB u-blox
+receiver, or use `--gps-port /actual/gps/device` for an explicit port. Connect it
+to the same Mac/Pi running patrol, separately from the rover and microphone.
+Close the standalone GPS checker first: only one process may own the GPS port.
+No firmware update is required. Without this option, GPS remains disabled.
+
+The dashboard includes a local, north-up coordinate map with a metre grid, a
+blue current-rover marker, and numbered green confirmation markers. It uses no
+remote map service and sends no location data externally. There are no street
+or building tiles. The local projection is an overview, not survey-grade or
+long-distance navigation. GPS settings are under `rover.gps` in rubble.yaml.
+
+Each deterministic CONFIRMED gap result stores a GPS snapshot in `location`
+in events.jsonl. The result survives later travel and remains in dashboard
+history during the session. It means **rover position at confirmation**, not
+the person's exact location: one microphone does not give range or bearing.
+The map does not steer the rover. A fresh positive GGA fix and noncontradictory
+recent RMC status are required. No fix, disconnected receiver, or a fix older
+than three seconds yields location unavailable; findings are never backfilled
+with a later coordinate. HDOP is dimensionless, not a metre accuracy estimate.
+Coordinates are now intentionally stored locally in the session's black box.
+
+Example (from the repository directory, using the existing forward route):
+
+```bash
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick \
+  --profile clap-knocks --route /private/tmp/heartbeat-forward-longer.yaml \
+  --knocker speaker --gps-port auto --dashboard --port 8001
+```
+
+An absent/ambiguous GPS at startup causes startup to fail before patrol starts;
+a receiver disconnect after startup makes location unavailable. It does not
+silently substitute a guessed position. On Raspberry Pi use the actual rover
+and GPS `/dev/serial/by-id/` paths and a route file present on that Pi.
+
+
+### Temporary two-knock mode
+
+`clap-knocks` now sets `rover.audio_stop.verification_mode: two_knock`.
+The first knock candidate stops travel; one fresh accepted knock after settling
+records `reason: KNOCK_VERIFIED` and the current rover GPS snapshot, then resumes.
+There is no changing-pattern challenge or interview in this mode. Person status
+remains POSSIBLE, random-match odds are not assessed, and dig approval remains
+unavailable. Missing a second knock still holds in REVIEW. Map entries are
+labeled Knock verified; missing GPS is never replaced by a later fix.
+Set verification_mode back to `challenge` to restore person confirmation.

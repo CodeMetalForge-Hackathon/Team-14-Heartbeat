@@ -90,6 +90,7 @@ class ServerConfig:
         dashboard_keys = {
             "trace_seconds", "event_log_limit", "reconnect_ms", "state_refresh_ms",
             "trace_min_dbfs", "trace_max_dbfs", "trace_grid_db", "trace_grid_s",
+            "map_min_span_m",
         }
         if set(dashboard) != dashboard_keys:
             raise ValueError("server.dashboard must contain only the documented UI settings")

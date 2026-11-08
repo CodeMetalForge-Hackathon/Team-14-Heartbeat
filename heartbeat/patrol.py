@@ -81,7 +81,14 @@ class Patrol:
         self.audio_enabled = self.audio_stop.get("enabled", False)
         if not isinstance(self.audio_enabled, bool):
             raise ValueError("rover.audio_stop.enabled must be boolean")
+        self.verification_mode = self.audio_stop.get("verification_mode", "challenge")
+        if self.verification_mode not in {"challenge", "two_knock"}:
+            raise ValueError("rover.audio_stop.verification_mode must be challenge or two_knock")
         self.trigger_mode = self.audio_stop.get("trigger_mode", "all")
+        if self.verification_mode == "two_knock" and (
+                not self.audio_enabled or self.trigger_mode != "knocks"
+                or self.audio_stop.get("knock_count") != 1):
+            raise ValueError("two_knock mode requires enabled knock-only audio stops and knock_count=1")
         self.scheduled_listen = self.audio_stop.get("scheduled_listen", True)
         self.moving_knock_threshold = self.audio_stop.get("moving_knock_threshold")
         if self.moving_knock_threshold is not None and (
@@ -126,6 +133,7 @@ class Patrol:
             navigation_args(self.cfg["navigation"])
         self._explore_move = None
         self.results = []
+        self.gps = None
         self.state = "IDLE"
         self.repeat_route = self.cfg.get("repeat_route", False)
         self.resume_after_confirmed = self.audio_stop.get("resume_after_confirmed", False)
@@ -342,6 +350,7 @@ class Patrol:
                 "listening": self.state in {"LISTENING", "VERIFYING"},
                 "paused": self.state in {"PAUSED", "REVIEW"},
                 "audio_stop_enabled": self.audio_enabled,
+                "verification_mode": self.verification_mode,
                 "trigger": deepcopy(self._trigger), "verified_cue": deepcopy(self._verified_cue),
                 "fault": self._fault_reason,
                 "estopped": self.state == "ESTOP" or bool(getattr(self.rover, "estopped", False)),
@@ -349,6 +358,7 @@ class Patrol:
                 "interrupted_move": self._interrupted_move,
                 "arrival_unverified": self._arrival_unverified,
                 "route": deepcopy(self.route),
+                "gps": self.gps.snapshot() if self.gps else {"enabled": False, "current_fix": False},
                 "results": deepcopy(self.results)}
 
     def approve(self, gap, operator):
@@ -500,9 +510,12 @@ class Patrol:
         if completion == "reported":
             if ok is not True:
                 self._error("LED update failed")
-            if (ok is True and self.audio_enabled and self.resume_after_confirmed
-                    and self.results and self.results[-1]["reason"] == "CONFIRMED"
-                    and self.results[-1]["status"] == "CONFIRMED"):
+            verified_knock = (self.verification_mode == "two_knock" and self.results
+                              and self.results[-1]["reason"] == "KNOCK_VERIFIED")
+            confirmed_person = (self.resume_after_confirmed and self.results
+                                and self.results[-1]["reason"] == "CONFIRMED"
+                                and self.results[-1]["status"] == "CONFIRMED")
+            if ok is True and self.audio_enabled and (verified_knock or confirmed_person):
                 # Wait for physical prompts and their audio tail before restarting.
                 self._auto_continue_pending = True
             elif self.audio_enabled:
@@ -556,7 +569,7 @@ class Patrol:
                 and not self._halted and not self._dialog_busy()
                 and t >= self._prompt_gate_until):
             self._auto_continue_pending = False
-            self.pipeline.bus.publish("operator", t, command="resume", source="confirmed_policy")
+            self.pipeline.bus.publish("operator", t, command="resume", source="verification_policy")
             self._engine_command("reset")
             self._next_gap()
         elif self.state == "STOPPING" and t >= self._deadline:
@@ -577,6 +590,9 @@ class Patrol:
                 self._begin_verify()
             else:
                 self._begin_listen()
+        elif (self.state == "VERIFYING" and self.verification_mode == "two_knock"
+              and self._verified_cue is not None):
+            self._gap_result(self.engine.snapshot(), "KNOCK_VERIFIED")
         elif self.state == "VERIFYING" and t >= self._deadline:
             if self._verified_cue is not None:
                 self._begin_listen()
@@ -615,6 +631,13 @@ class Patrol:
                 # A missing answer never erases the initial possible-person cue.
                 if result["status"] != "CONFIRMED":
                     result["status"] = "POSSIBLE"
+        if reason == "KNOCK_VERIFIED":
+            # Two acoustic detections are not person confirmation or dialog odds.
+            result.update(status="POSSIBLE", evidence="KNOCK_VERIFIED", odds="Not assessed", combined_p=None)
+        if reason == "KNOCK_VERIFIED" or reason == "CONFIRMED" and result["status"] == "CONFIRMED":
+            location = self.gps.snapshot() if self.gps else {"enabled": False, "current_fix": False}
+            result["location"] = {**location, "confirmation_t": self.pipeline.t,
+                                  "meaning": "Rover position at verification; person position unknown"}
         self.results.append(result)
         self.pipeline.bus.publish("gap_result", self.pipeline.t, **result)
         self._emit_state("REPORTING")

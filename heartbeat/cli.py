@@ -138,6 +138,7 @@ def _parser() -> argparse.ArgumentParser:
     patrol.add_argument("--sensor-port", type=int, choices=range(6, 11))
     patrol.add_argument("--explore-seconds", type=_positive_float, help="bounded exploration duration per start/resume (max 600)")
     patrol.add_argument("--dry-run", action="store_true", help="fake rover and simulated survivor; no hardware")
+    patrol.add_argument("--gps-port", help="GPS USB port, or auto for a single u-blox receiver")
     patrol.add_argument("--dashboard", action="store_true")
     patrol.add_argument("--host")
     patrol.add_argument("--port", type=int)
@@ -662,7 +663,9 @@ def _patrol(args, profile, bus) -> int:
     errors = []
     bus.subscribe(lambda event: errors.append(event) if event.type == "error"
                   and event.data.get("severity") != "warning" else None)
-    runtime = controller = rover = None
+    runtime = controller = rover = gps = None
+    if args.dry_run and args.gps_port:
+        raise ValueError("--gps-port cannot be used with --dry-run")
     try:
         directory = _run_directory(args, profile)
         if args.dry_run:
@@ -701,6 +704,15 @@ def _patrol(args, profile, bus) -> int:
                 sink = StickStatusSink(runtime.pipeline.source)
                 unsubscribe = bus.subscribe(sink)
                 runtime.on_close.extend([unsubscribe, sink.close])
+            if args.gps_port:
+                from .gps import GPSReader
+                ports = {rover.port}
+                if isinstance(runtime.pipeline.source, StickMicSource):
+                    ports.add(runtime.pipeline.source.port)
+                if args.knocker not in {"auto", "speaker", "manual"}:
+                    ports.add(args.knocker)
+                gps = GPSReader(args.gps_port, profile.rover["gps"], exclude_ports=ports)
+                controller.gps = gps
             controller.start()
         runtime.patrol = controller
         print("Keys then Enter: p pause, r resume, q abort, e or Space E-STOP. Ctrl-C also stops.")
@@ -719,6 +731,8 @@ def _patrol(args, profile, bus) -> int:
             runtime.close()
         if rover is not None:
             rover.close()
+        if gps is not None:
+            gps.close()
     print("Gap | Status | Odds | Answers")
     for result in controller.results:
         position = " (position unverified)" if result.get("arrival_unverified") else ""

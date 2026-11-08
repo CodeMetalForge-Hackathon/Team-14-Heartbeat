@@ -33,6 +33,7 @@
     text("connection-label", label);
     controls();
     renderMission();
+    renderGPS();
   }
   function feedback(message, error = false) {
     text("command-feedback", message);
@@ -138,7 +139,7 @@
       row.classList.toggle("current-gap", current);
       row.cells[0].textContent = name;
       const status = row.querySelector(".gap-status"), note = row.querySelector(".gap-note");
-      status.textContent = result ? result.status.replaceAll("_", " ") : current ? patrolPhase(patrol) : "Pending";
+      status.textContent = result ? (result.reason === "KNOCK_VERIFIED" ? "Knock verified" : result.status.replaceAll("_", " ")) : current ? patrolPhase(patrol) : "Pending";
       status.className = `gap-status ${result ? result.status.toLowerCase() : current ? "active" : "pending"}`;
       const notes = [];
       if (result?.arrival_unverified) notes.push("Arrival unverified");
@@ -156,10 +157,67 @@
     });
     patrolControls();
   }
+  function renderGPS() {
+    const gps = state?.patrol?.gps || {};
+    const findings = (state?.patrol?.results || []).filter(item => item.status === "CONFIRMED" || item.reason === "KNOCK_VERIFIED");
+    const current = connected && state?.pipeline_running !== false && gps.current_fix;
+    text("gps-status", !gps.enabled ? "GPS disabled · start patrol with --gps-port auto" : !connected ? "Connection lost · live GPS unavailable" : gps.error ? `GPS disconnected: ${gps.error}` : current ? `Live fix · ${gps.satellites_used} satellites · HDOP ${gps.hdop ?? "unknown"} (not metres)` : "No fresh position fix · check antenna and sky view");
+    const valid = point => point?.current_fix && Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Math.abs(point.latitude) <= 90 && Math.abs(point.longitude) <= 180;
+    const list = byId("gps-findings");
+    const signature = JSON.stringify(findings.map(item => [item.gap, item.location]));
+    if (list.dataset.signature !== signature) {
+      list.dataset.signature = signature;
+      if (!findings.length) list.textContent = "No verified findings yet.";
+      else list.replaceChildren(...findings.map((item, i) => {
+        const row = document.createElement("div"), heading = document.createElement("strong"), note = document.createElement("p");
+        heading.textContent = `${i+1}. ${item.reason === "KNOCK_VERIFIED" ? "Knock verified" : "Person confirmed"} · ${item.gap}`;
+        const point = item.location;
+        note.textContent = valid(point) ? `Rover at verification: ${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)} · session ${clock(point.confirmation_t)} · GPS received ${point.received_at}` : "Verified finding · location unavailable at verification";
+        row.append(heading, note); return row;
+      }));
+    }
+    const points = findings.flatMap((item, i) => valid(item.location) ? [{...item.location, label: String(i+1), kind: "finding", title: item.gap}] : []);
+    if (current && valid(gps)) points.push({...gps, label: "R", kind: "rover", title: "Current rover fix"});
+    const map = byId("gps-map"); map.hidden = !points.length; byId("map-empty").hidden = !!points.length;
+    text("map-location", current && valid(gps) ? `Rover: ${gps.latitude.toFixed(6)}, ${gps.longitude.toFixed(6)} · fix age ${gps.navigation_age_s}s` : points.length ? "Recorded verification locations shown. Current rover location unavailable." : "No fresh GPS position available.");
+    map.replaceChildren();
+    if (!points.length) return;
+    const svg = (tag, attrs, label) => {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+      if (label !== undefined) node.textContent = label;
+      map.append(node); return node;
+    };
+    // Local equirectangular projection; this is an overview, not navigation.
+    const origin = points[0], radians = Math.PI / 180, radius = 6371000;
+    const projected = points.map(point => ({...point,
+      x: ((point.longitude-origin.longitude+540)%360-180)*radians*radius*Math.cos(origin.latitude*radians),
+      y: (point.latitude-origin.latitude)*radians*radius}));
+    const xs = projected.map(point => point.x), ys = projected.map(point => point.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const span = Math.max(maxX-minX, (maxY-minY)*2, ui.map_min_span_m);
+    const scale = 520/span, centerX = (minX+maxX)/2, centerY = (minY+maxY)/2;
+    for (let x=60; x<=580; x+=65) svg("line", {x1:x, y1:40, x2:x, y2:300, stroke:"#263b49"});
+    for (let y=40; y<=300; y+=65) svg("line", {x1:60, y1:y, x2:580, y2:y, stroke:"#263b49"});
+    svg("text", {x:25, y:28, fill:"#a6b8c5", "font-size":14}, "N ↑");
+    svg("text", {x:60, y:335, fill:"#a6b8c5", "font-size":12}, `Grid spacing ≈ ${(65/scale).toFixed(1)} m · local overview, not survey accuracy`);
+    for (const point of projected) {
+      const x=320+(point.x-centerX)*scale, y=170-(point.y-centerY)*scale;
+      const circle=svg("circle", {cx:x, cy:y, r:point.kind === "rover" ? 10 : 15, fill:point.kind === "rover" ? "#8ecbff" : "#78e4b2", stroke:"#0c141b", "stroke-width":3});
+      const title=document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent=`${point.title}: ${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)}`; circle.append(title);
+      svg("text", {x:x+18, y:y-15, fill:"#edf5fa", "font-size":14}, point.label);
+    }
+  }
+
   function renderMission() {
     const patrol = state?.patrol;
     const results = patrol?.results || [];
-    const confirmed = results.filter(item => item.status === "CONFIRMED").length;
+    const demoMode = patrol?.verification_mode === "two_knock";
+    const confirmed = results.filter(item => demoMode ? item.reason === "KNOCK_VERIFIED" : item.status === "CONFIRMED").length;
+    text("summary-findings-label", demoMode ? "VERIFIED KNOCK FINDINGS" : "CONFIRMED FINDINGS");
+    text("step-verify", demoMode ? "03  Verify second knock" : "03  Challenge");
+    text("step-confirm", demoMode ? "04  Record & continue" : "04  Confirm person");
     let title = "Listening for knocks", instruction = "No person confirmed. No response does not mean nobody is there.", tone = "neutral", step = "search";
     if (patrol) {
       const phases = {
@@ -185,6 +243,11 @@
       title = "Person confirmed"; instruction = "The response matched the changing knock patterns. The finding is recorded below."; tone = "confirmed"; step = "confirm";
     }
     if (patrol?.fault) { title = "Rover fault · motion unverified"; instruction = String(patrol.fault); tone = "danger"; }
+    if (demoMode && patrol?.state === "REPORTING" && results.at(-1)?.reason === "KNOCK_VERIFIED") {
+      title = "Knock verified · recording location";
+      instruction = "Two knock detections recorded. Person identity is not confirmed. Patrol continues automatically.";
+      tone = "attention"; step = "confirm";
+    }
     if (state?.pipeline_running === false) { title = "Session ended"; instruction = "Live monitoring has stopped. Review the recorded findings below."; tone = "neutral"; }
     if (!connected) { title = "Live connection lost"; instruction = "Displayed readings may be old. Rover movement cannot be verified from this page."; tone = "danger"; }
     text("mission-title", title); text("mission-instruction", instruction);
@@ -219,7 +282,9 @@
     const status = state.status || "NO_SIGNS";
     byId("status-card").className = `status-card ${status.toLowerCase()}`;
     text("status-title", ({NO_SIGNS: "No person confirmed", POSSIBLE: "Possible person", CONFIRMED: "Person confirmed"})[status] || status);
-    text("phase", phaseLabel(state));
+    text("phase", state.patrol?.verification_mode === "two_knock"
+      ? "Temporary two-knock mode · pattern challenge skipped · person not confirmed"
+      : phaseLabel(state));
     text("odds", state.odds);
     const badge = byId("approval-badge");
     badge.hidden = !state.approved;
@@ -240,6 +305,7 @@
         : `Black box: ${Number(box.events || 0).toLocaleString()} events, hash-chained.`);
     }
     renderPatrol();
+    renderGPS();
     renderMission();
     controls();
   }

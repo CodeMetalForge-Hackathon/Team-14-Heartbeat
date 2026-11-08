@@ -4,6 +4,8 @@ rover:
   # Repeat the finite route until an operator stop or a hardware fault.
   repeat_route: true
   audio_stop:
+    # Temporary demo: a fresh stationary second knock records a finding and resumes.
+    verification_mode: two_knock
     # Automatically continue only after deterministic person confirmation.
     resume_after_confirmed: true
     # Applies only to hb patrol; hb listen/run never issue motor commands.

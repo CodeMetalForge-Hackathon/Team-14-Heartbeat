@@ -412,6 +412,8 @@ server:
     # Maximum wait for optional Git metadata collection, in seconds.
     git_timeout_s: 2.0
   dashboard:
+    # Minimum east-west extent of the local GPS overview, in metres.
+    map_min_span_m: 40
     # Width of the live audio history, in stream seconds.
     trace_seconds: 20.0
     # Maximum number of recent activity events shown in the browser.
@@ -477,6 +479,15 @@ rover:
   fake_turn_deg_s: 90.0
   # Motor-off settling time before opening detection, in stream seconds.
   settle_s: 2.0
+  gps:
+    # Native USB receiver UART compatibility setting.
+    baudrate: 38400
+    # Bound background serial reads in seconds.
+    read_timeout_s: 0.5
+    # Reject positions older than this many wall-clock seconds.
+    stale_s: 3.0
+    # Maximum bytes read for one NMEA sentence.
+    max_sentence_bytes: 1024
   audio_stop:
     # Opt in to automatic audio stops and operator review at every checked gap.
     enabled: false
