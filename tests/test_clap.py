@@ -45,9 +45,9 @@ def test_clap_preserves_event_time_gate_and_clip_and_combines_positive_descripti
         requests.append((path, body))
         return identity(profile.classifier.clap) if body is None else response(profile.classifier.clap, body)
     classifier = ClapClassifier(profile.classifier, request=request)
-    source = onset(t=2.34, gated=True)
+    source = onset(t=2.34, gated=False)
     det = classifier.classify(source)
-    assert det.t == source.t and det.clip is source.clip and det.gated
+    assert det.t == source.t and det.clip is source.clip and det.gated == source.gated
     assert det.score == pytest.approx(0.8) and det.is_knock and det.classifier == "clap"
     assert len(requests[1][1]) == BODY_BYTES
     assert [name for name, _ in requests] == ["/health", "/classify"]
@@ -70,6 +70,8 @@ def test_unavailable_clap_never_falls_back_to_passthrough(profile, monkeypatch):
     def fail(*args):
         raise ConnectionError("service is not running")
     monkeypatch.setattr(ClapClassifier, "_http", fail)
+    profile = replace(profile, classifier=replace(profile.classifier,
+                      clap={**profile.classifier.clap, "on_failure": "stop"}))
     with pytest.raises(RuntimeError, match="CLAP service unavailable"):
         make_classifier(profile)
 

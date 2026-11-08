@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 PROTOCOL = "heartbeat-clap-v1"
 SAMPLE_RATE = 16000
+BUSY_STATUS_INTERVAL_S = 10  # Fixed CLAP-05 status cadence, independent of health retries.
 CLIP_SAMPLES = 15600
 BODY_BYTES = CLIP_SAMPLES * 4  # Protocol: mono little-endian float32, no WAV header.
 RESPONSE_BYTES = 65536  # Bound JSON responses from a configured inference endpoint.
@@ -14,13 +15,20 @@ RESPONSE_BYTES = 65536  # Bound JSON responses from a configured inference endpo
 def validate_clap(settings):
     required = {"endpoint", "timeout_s", "max_pending", "max_lag_s", "model",
                 "revision", "device", "cpu_threads", "positive_prompts", "negative_prompts"}
-    if not isinstance(settings, dict) or set(settings) - {"monitor"} != required:
+    optional = {"monitor", "on_failure", "fallback", "retry_s"}
+    if not isinstance(settings, dict) or set(settings) - optional != required:
         raise ValueError(f"classifier.clap requires exactly: {', '.join(sorted(required))}")
+    settings = {"on_failure": "fallback", "fallback": "heuristic", "retry_s": 10, **settings}
+    if not isinstance(settings["on_failure"], str) or settings["on_failure"] not in {"fallback", "stop"}:
+        raise ValueError("classifier.clap.on_failure must be fallback or stop")
+    if (not isinstance(settings["fallback"], str) or not settings["fallback"].strip()
+            or settings["fallback"] in {"clap", "none"}):
+        raise ValueError("classifier.clap.fallback must classify impacts; clap and passthrough none are forbidden")
     endpoint = urlsplit(settings["endpoint"])
     if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.username
             or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path not in ("", "/")):
         raise ValueError("classifier.clap.endpoint must be an HTTP(S) origin without credentials or a path")
-    for name in ("timeout_s", "max_pending", "max_lag_s", "cpu_threads"):
+    for name in ("timeout_s", "max_pending", "max_lag_s", "cpu_threads", "retry_s"):
         value = settings[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"classifier.clap.{name} must be positive and finite")

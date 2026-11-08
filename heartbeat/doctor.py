@@ -53,6 +53,7 @@ class Check:
     detail: str
     hint: str
     skipped: bool = False
+    warning: bool = False
 
 
 def _validate_settings(settings: dict) -> dict:
@@ -325,6 +326,36 @@ def probe_classifier(profile) -> dict:
             "detail": f"requested {profile.classifier.name}; active {detection.classifier} (CPU inference passed)"}
 
 
+def probe_clap(profile, *, request=None, clock=None) -> Check:
+    """Strict health/identity check and five synthetic classifications; no fallback."""
+    from .classifiers.clap import ClapClassifier
+    from .onset import CLIP_SAMPLES, PRE_SAMPLES, Onset
+    from .synth import knock
+
+    clock = clock or time.perf_counter
+    cfg = replace(profile.classifier, clap={**profile.classifier.clap, "on_failure": "stop"})
+    try:
+        classifier = ClapClassifier(cfg, request=request)
+        sound = knock(cfg=profile.audio.synth)
+        clip = np.zeros(CLIP_SAMPLES, np.float32)
+        count = min(len(sound), CLIP_SAMPLES - PRE_SAMPLES)
+        clip[PRE_SAMPLES:PRE_SAMPLES + count] = sound[:count]
+        onset = Onset(t=PRE_SAMPLES / SAMPLE_RATE, peak=float(np.max(np.abs(clip))),
+                      snr_db=profile.onset.threshold_db, gated=False, clip=clip)
+        durations = []
+        for _ in range(5):
+            started = clock()
+            classifier.classify(onset)
+            durations.append((clock() - started) * 1000)
+        median, maximum = float(np.median(durations)), max(durations)
+        ok = maximum < classifier.settings["timeout_s"] * 500
+        detail = f"identity matched; 5 classifications: median {median:.1f} ms, max {maximum:.1f} ms"
+        hint = "" if ok else "CLAP too slow for live use here: raise timeout_s or run the service on a faster machine."
+        return Check("CLAP service", ok, detail, hint, warning=not ok)
+    except Exception as exc:
+        return Check("CLAP service", False, str(exc), "Start the matching CLAP service and check its endpoint/profile.")
+
+
 def probe_disk(path) -> int:
     path = Path(path).resolve()
     while not path.exists() and path != path.parent:
@@ -437,10 +468,14 @@ def run_doctor(profile, *, device="stick", speaker_device=None, play=False, sett
                             "Check aplay -l and --speaker-device, or use prompter.voice: none.", skipped=not play))
     active = None
     try:
-        classifier = probe_classifier(profile)
-        active = classifier["active"]
-        checks.append(Check("classifier", active != "none" or profile.classifier.name == "none", classifier["detail"],
-                            "Run uv sync --extra ml, then uv run --no-sync --extra ml python tools/fetch_models.py --allow-network."))
+        if profile.classifier.name == "clap":
+            checks.append(probe_clap(profile))
+            active = "clap"  # Models live in the external service, not this process.
+        else:
+            classifier = probe_classifier(profile)
+            active = classifier["active"]
+            checks.append(Check("classifier", active != "none" or profile.classifier.name == "none", classifier["detail"],
+                                "Run uv sync --extra ml, then uv run --no-sync --extra ml python tools/fetch_models.py --allow-network."))
     except Exception as exc:
         checks.append(Check("classifier", False, str(exc), "Check the classifier profile, model files, and --extra ml."))
     try:
@@ -452,7 +487,7 @@ def run_doctor(profile, *, device="stick", speaker_device=None, play=False, sett
         checks.append(Check("models", not absent,
                             "present: " + (", ".join(present) or "none") + "; missing: " + (", ".join(absent) or "none"),
                             "Run uv run --no-sync --extra ml python tools/fetch_models.py --allow-network; train a head separately if needed.",
-                            skipped=bool(absent) and active in {"heuristic", "none", "head_dsp", "yamnet"}))
+                            skipped=bool(absent) and active in {"heuristic", "none", "head_dsp", "yamnet", "clap"}))
     except Exception as exc:
         checks.append(Check("models", False, str(exc), "Check model paths and filesystem permissions."))
     try:
@@ -483,7 +518,7 @@ def run_doctor(profile, *, device="stick", speaker_device=None, play=False, sett
 def format_doctor(checks: list[Check]) -> str:
     lines = []
     for check in checks:
-        marker = "✅" if check.ok or check.skipped else "❌"
+        marker = "⚠️" if check.warning else "✅" if check.ok or check.skipped else "❌"
         suffix = " (skipped)" if check.skipped else ""
         lines.append(f"{marker} {check.name}{suffix}: {check.detail}")
         if check.hint:

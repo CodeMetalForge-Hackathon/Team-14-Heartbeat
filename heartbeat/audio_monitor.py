@@ -60,11 +60,29 @@ class AudioMonitor:
         self.blocked_until = 0.0
         self.patrol_blocked = False
         self.patrol_phase = None
+        self.clap_paused = False
         self.last_alert = -float("inf")
         self.skipped = 0
         self.unsubscribe = bus.subscribe(self._event)
 
     def _event(self, event):
+        if event.data.get("code") in {"clap_degraded", "clap_restored"}:
+            paused = event.data["code"] == "clap_degraded"
+            if paused == self.clap_paused:
+                return
+            self.clap_paused = paused
+            self.generation += 1
+            self.buffer.clear()
+            self.ready = None
+            self.next_end = self.end + self.size
+            if self.pending:
+                self.pending[-1].cancel()
+                self.pending = None
+            self.bus.publish("status", event.t,
+                             code="clap_monitor_paused" if paused else "clap_monitor_resumed",
+                             message="Vocal monitoring paused while CLAP is offline" if paused else
+                                     "Vocal monitoring resumed with fresh audio")
+            return
         if event.type == "patrol" and event.data.get("audio_stop_enabled"):
             phase = event.data.get("state")
             if phase == self.patrol_phase:
@@ -87,7 +105,7 @@ class AudioMonitor:
             self.ready = None
             self.generation += 1
         self.end = start + len(block.x)
-        if self.patrol_blocked or block.t0 < self.blocked_until:
+        if self.clap_paused or self.patrol_blocked or block.t0 < self.blocked_until:
             self.buffer.clear()
             return
         self.buffer.extend(block.x)
@@ -109,6 +127,8 @@ class AudioMonitor:
         self.ready = (self.end / SAMPLE_RATE, clip, self.generation)
 
     def poll(self, executor=None, *, can_submit=True, wait=False):
+        if self.clap_paused:
+            return
         if self.pending:
             end, clip, generation, future = self.pending
             if not wait and not future.done():

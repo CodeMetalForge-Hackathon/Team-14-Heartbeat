@@ -6,9 +6,15 @@ classifier:
   # Initial relative-score threshold only; calibrate on real short onset clips.
   threshold: 0.6
   clap:
+    # Keep listening with a classified fallback when CLAP is unavailable; stop opts out.
+    on_failure: fallback
+    # Registered local classifier used during outages, prompt gates and queue pressure.
+    fallback: heuristic
+    # Stream seconds between nonblocking health probes while degraded.
+    retry_s: 10
     # Change the host to the Jetson's LAN address for remote inference.
     endpoint: http://127.0.0.1:8766
-    # Per-request transport timeout; failed inference stops this audio session.
+    # Per-request transport timeout before fallback, or stopping when explicitly selected.
     timeout_s: 1.5
     # Maximum queued/in-flight onset requests, including the active request.
     max_pending: 4

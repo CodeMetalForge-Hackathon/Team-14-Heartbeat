@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 import time
 from typing import Any
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 
 class Pipeline:
@@ -48,6 +48,16 @@ class Pipeline:
         self._inference = None
         self._pending_inference = deque()
         self.inference_failed = False
+        self._fallback = getattr(classifier, "fallback_classifier", None)
+        self._clap_settings = getattr(classifier, "settings", {})
+        self._fallback_name = getattr(self._fallback, "name", self._clap_settings.get("fallback", "heuristic"))
+        self._degrade_enabled = (self._fallback is not None
+                                and self._clap_settings.get("on_failure") == "fallback")
+        self._clap_degraded = False
+        self._health_executor = self._health_future = None
+        self._next_health_at = 0.0
+        self._busy_count = 0
+        self._busy_status_at = -math.inf
         self._monitor = None
         monitor_cfg = getattr(classifier, "settings", {}).get("monitor")
         if monitor_cfg and monitor_cfg["enabled"]:
@@ -155,7 +165,22 @@ class Pipeline:
             self._poll_inference()
             if self._stop.is_set():
                 return
-            if len(self._pending_inference) >= self.classifier.max_pending:
+        if self._fallback is not None and (onset.gated or self._clap_degraded):
+            self._fallback_sound(onset)
+            return
+        if self._async_inference:
+            pending = sum(not getattr(f, "fallback_decision", False) for _, f in self._pending_inference)
+            if pending >= self.classifier.max_pending:
+                if self._degrade_enabled:
+                    self._fallback_sound(onset)
+                    self._busy_count += 1
+                    from .clap_settings import BUSY_STATUS_INTERVAL_S
+                    if self.t - self._busy_status_at >= BUSY_STATUS_INTERVAL_S:
+                        self._busy_status_at = self.t
+                        self.bus.publish("status", self.t, code="clap_busy", count=self._busy_count,
+                                         fallback=self._fallback_name,
+                                         message=f"CLAP busy: {self._busy_count} sounds classified by {self._fallback_name}")
+                    return
                 self._fail_inference(RuntimeError("CLAP request queue is full; listening stopped"))
                 return
             future = self._inference.submit(self.classifier.classify, onset)
@@ -166,10 +191,28 @@ class Pipeline:
         except Exception as exc:
             if getattr(self.classifier, "name", None) == "clap":
                 self._fail_inference(exc)
+                if self._clap_degraded:
+                    self._fallback_sound(onset)
                 return
             self._error("classifier", exc)
             return
         self._publish_detection(det)
+
+    def _fallback_sound(self, onset):
+        try:
+            det = self._fallback.classify(onset)
+        except Exception as exc:
+            # A broken fallback cannot make an unclassified impact an answer.
+            self._stop_inference(exc)
+            return
+        if self._pending_inference:
+            # Preserve temporal order behind earlier in-flight classifications.
+            future = Future()
+            future.fallback_decision = True
+            future.set_result(det)
+            self._pending_inference.append((onset, future))
+        else:
+            self._publish_detection(det)
 
     def _publish_detection(self, det) -> None:
         self.bus.publish(
@@ -189,6 +232,27 @@ class Pipeline:
         self._call_hooks(self.on_sound, det, "on_sound")
 
     def _fail_inference(self, exc):
+        if self._degrade_enabled:
+            if not self._clap_degraded:
+                self._clap_degraded = True
+                self._next_health_at = self.t + self._clap_settings["retry_s"]
+                self.bus.publish("error", self.t, code="clap_degraded", where="classifier",
+                                 severity="warning", reason=str(exc), fallback=self._fallback_name,
+                                 message=f"CLAP offline: using {self._fallback_name} (retrying): {exc}")
+            pending = list(self._pending_inference)
+            self._pending_inference.clear()
+            for onset, future in pending:
+                if getattr(future, "fallback_decision", False):
+                    self._publish_detection(future.result())
+                else:
+                    future.cancel()
+                    self._fallback_sound(onset)
+                if self._stop.is_set():
+                    break
+            return
+        self._stop_inference(exc)
+
+    def _stop_inference(self, exc):
         if not self.inference_failed:
             self.inference_failed = True
             self._error("classifier", exc)
@@ -197,13 +261,36 @@ class Pipeline:
         self._pending_inference.clear()
         self.stop()
 
+    def _poll_health(self):
+        if not self._clap_degraded or self._stop.is_set():
+            return
+        if self._health_future is not None:
+            if not self._health_future.done():
+                return
+            future, self._health_future = self._health_future, None
+            self._next_health_at = self.t + self._clap_settings["retry_s"]
+            try:
+                future.result()
+            except Exception:
+                return  # Stay degraded, including an identity mismatch on retry.
+            self._clap_degraded = False
+            self.bus.publish("status", self.t, code="clap_restored", message="CLAP restored")
+            return
+        if self.t >= self._next_health_at:
+            if self._health_executor is None:
+                self._health_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="heartbeat-clap-health")
+            self.bus.publish("status", self.t, code="clap_retrying", fallback=self._fallback_name,
+                             message=f"CLAP offline: using {self._fallback_name} (retrying)")
+            self._health_future = self._health_executor.submit(self.classifier.check_health)
+
     def _poll_inference(self, *, wait=False):
         while self._pending_inference and not self._stop.is_set():
             onset, future = self._pending_inference[0]
             # Live deadlines use sample time; request timeouts independently
             # bound network stalls, including at EOF when sample time stops.
-            if self.t - onset.t > self.classifier.max_lag_s:
-                self._fail_inference(RuntimeError("CLAP result exceeded maximum audio lag; listening stopped"))
+            if (not getattr(future, "fallback_decision", False)
+                    and self.t - onset.t > self.classifier.max_lag_s):
+                self._fail_inference(RuntimeError("CLAP result exceeded maximum audio lag"))
                 return
             if not wait and not future.done():
                 return
@@ -221,6 +308,8 @@ class Pipeline:
         level_hz = self.profile.audio.level_hz
         next_level = 0
         self.bus.publish("session_start", self.t)
+        if getattr(self.classifier, "startup_error", None) is not None:
+            self._fail_inference(self.classifier.startup_error)
         if self._async_inference:
             self._inference = ThreadPoolExecutor(max_workers=1, thread_name_prefix="heartbeat-classifier")
         try:
@@ -231,6 +320,7 @@ class Pipeline:
                 # Stay on the integer sample lattice rather than accumulating
                 # rounding error by adding floating-point hop durations.
                 self.t = (round(block.t0 * sample_rate) + len(block.x)) / sample_rate
+                self._poll_health()
                 self._call_hooks(self.on_audio, block, "on_audio")
                 try:
                     onsets = self.detector.process(block)
@@ -278,6 +368,8 @@ class Pipeline:
                     future.cancel()
                 self._pending_inference.clear()
                 self._inference.shutdown(wait=False, cancel_futures=True)
+            if self._health_executor is not None:
+                self._health_executor.shutdown(wait=False, cancel_futures=True)
             self._call_hooks(self.on_end, self.t, "on_end")
             self._close_source()
             self.bus.publish("session_end", self.t)

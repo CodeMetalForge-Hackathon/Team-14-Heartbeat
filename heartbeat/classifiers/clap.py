@@ -1,6 +1,7 @@
 """In-memory CLAP client; PyTorch lives only in the separate inference service."""
 
 from hashlib import sha256
+from dataclasses import replace
 import json
 from time import perf_counter
 from urllib.request import Request, urlopen
@@ -10,6 +11,10 @@ import numpy as np
 from ..clap_settings import CLIP_SAMPLES, PROTOCOL, RESPONSE_BYTES, SAMPLE_RATE, validate_clap
 from ..classify import Detection
 from ..audio_monitor import monitor_identity, decode_observation
+
+
+class ClapIdentityError(ValueError):
+    """A reachable service has the wrong model, descriptions or contract."""
 
 
 class ClapClassifier:
@@ -25,6 +30,24 @@ class ClapClassifier:
         self.max_lag_s = self.settings["max_lag_s"]
         self.inference_ms = 0.0
         self._request = request or self._http
+        from ..classify import _REGISTRY, PassThroughClassifier
+        factory = _REGISTRY.get(self.settings["fallback"])
+        if factory is None:
+            raise ValueError("CLAP fallback classifier is not registered")
+        self.fallback_classifier = factory(replace(cfg, name=self.settings["fallback"]))
+        if isinstance(self.fallback_classifier, (PassThroughClassifier, ClapClassifier)):
+            raise ValueError("CLAP fallback must be an independent impact classifier")
+        self.startup_error = None
+        try:
+            self.check_health()
+        except ClapIdentityError:
+            raise
+        except Exception as exc:
+            if self.settings["on_failure"] == "stop":
+                raise
+            self.startup_error = exc
+
+    def check_health(self):
         self._validate_identity(self._request("/health", None))
 
     def _http(self, path, data):
@@ -42,10 +65,10 @@ class ClapClassifier:
                     "revision": self.settings["revision"], "labels": self.labels,
                     "sample_rate": SAMPLE_RATE, "clip_samples": CLIP_SAMPLES}
         if not isinstance(response, dict) or any(response.get(key) != value for key, value in expected.items()):
-            raise ValueError("CLAP service model, descriptions, or audio contract does not match this profile")
+            raise ClapIdentityError("CLAP service model, descriptions, or audio contract does not match this profile")
         monitor = self.settings.get("monitor")
         if monitor and monitor["enabled"] and response.get("monitor") != monitor_identity(monitor):
-            raise ValueError("Restart CLAP service with the matching distress profile")
+            raise ClapIdentityError("Restart CLAP service with the matching distress profile")
 
     def observe(self, clip):
         cfg = self.settings["monitor"]
@@ -59,6 +82,8 @@ class ClapClassifier:
         return decode_observation(cfg, response, body)
 
     def classify(self, onset):
+        if onset.gated:
+            return self.fallback_classifier.classify(onset)
         clip = np.asarray(onset.clip, dtype=np.float32)
         if clip.shape != (CLIP_SAMPLES,) or not np.isfinite(clip).all() or np.max(np.abs(clip)) > 1:
             raise ValueError("CLAP requires 15600 finite mono samples in [-1, 1]")

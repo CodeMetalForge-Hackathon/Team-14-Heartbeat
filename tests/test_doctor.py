@@ -140,6 +140,46 @@ def test_doctor_formats_failure_hint_and_skipped_check():
     assert "Pi" in text and "Not applicable" in text
 
 
+@pytest.mark.parametrize('latencies, passed', [([.1, .2, .3, .4, .5], True),
+                                              ([.7, .8, .9, 1.0, 1.1], False)])
+def test_clap_doctor_health_and_five_classifications(latencies, passed):
+    from test_clap import identity, response
+    profile = load_profile('clap')
+    requests = []
+    def request(path, body):
+        requests.append(path)
+        if body is None:
+            return identity(profile.classifier.clap)
+        assert np.max(np.abs(np.frombuffer(body, dtype='<f4'))) > 0
+        return response(profile.classifier.clap, body)
+    times = iter([t for i, latency in enumerate(latencies) for t in (i * 2, i * 2 + latency)])
+    check = doctor.probe_clap(profile, request=request, clock=lambda: next(times))
+    assert check.ok is passed and check.warning is not passed
+    assert requests == ['/health'] + ['/classify'] * 5
+    text = doctor.format_doctor([check])
+    assert f'median {np.median(latencies) * 1000:.1f} ms' in text
+    assert f'max {max(latencies) * 1000:.1f} ms' in text
+    if not passed:
+        assert '⚠️' in text
+        assert 'CLAP too slow for live use here: raise timeout_s or run the service on a faster machine.' in text
+
+
+def test_clap_doctor_does_not_mask_outage_or_mismatch_with_fallback():
+    profile = load_profile('clap')
+    def offline(*args):
+        raise ConnectionRefusedError('offline')
+    assert not doctor.probe_clap(profile, request=offline).ok
+    assert not doctor.probe_clap(profile, request=lambda *args: {}).ok
+
+
+def test_doctor_selects_clap_check_and_skips_local_model_requirement(monkeypatch, healthy_probes):
+    expected = doctor.Check('CLAP service', True, 'fake latency passed', '')
+    monkeypatch.setattr(doctor, 'probe_clap', lambda profile: expected)
+    monkeypatch.setattr(doctor, 'probe_classifier', lambda profile: pytest.fail('duplicate classifier check'))
+    checks = doctor.run_doctor(load_profile('clap'))
+    assert expected in checks
+
+
 def test_audio_probe_consumes_two_seconds_on_sample_clock_and_closes(monkeypatch, profile, settings):
     source, calls = FakeAudio(_blocks(32256)), []
 

@@ -238,6 +238,7 @@
       case "audio_observation":
         return `${d.label} · score ${Number(d.score || 0).toFixed(2)}${d.alert ? " · Possible distress — review" : ""}${d.transcript ? ` · Heard: ${d.transcript}` : ""}${d.matched_phrases?.length ? ` · HELP_PHRASE: ${d.matched_phrases.join(", ")}` : ""}`;
       case "audio_monitor_status": return d.message || "Audio monitor status";
+      case "status": return d.message || d.code || "Status update";
       case "patrol_cue": return `${d.phase === "trigger" ? "Stopping to investigate" : "Fresh stationary evidence"}: ${d.label}`;
       case "sound": {
         const top = d.top?.[0]?.[0];
@@ -299,6 +300,12 @@
     cursor = event.seq;
     now = Math.max(now, Number(event.t || 0));
     const d = event.data || {};
+    if (["clap_degraded", "clap_retrying"].includes(d.code)) {
+      text("clap-banner", `CLAP offline: using ${d.fallback || "heuristic"} (retrying)`);
+      byId("clap-banner").hidden = false;
+    } else if (d.code === "clap_restored" || ["session_start", "session_end"].includes(event.type)) {
+      byId("clap-banner").hidden = true;
+    }
     if (event.type === "level") {
       levels.push({t: event.t, level: d.dbfs, floor: d.floor_db});
       text("meter-value", `${Number(d.dbfs).toFixed(1)} dBFS`);

@@ -253,3 +253,26 @@ def test_patrol_transition_cannot_remove_physical_prompt_gate(profile):
     feed(monitor, 0, 250)
     assert not any(e.type == "audio_observation" for e in events)
     monitor.close()
+
+
+def test_clap_degradation_pauses_monitor_and_restore_requires_fresh_audio(profile):
+    monitor, bus, events = make_monitor(profile)
+    feed(monitor, 0, 190, poll=False)
+    future = Future()
+    future.set_running_or_notify_cancel()
+    monitor.poll(SimpleNamespace(submit=lambda *args: future))
+    bus.publish('error', 3.04, code='clap_degraded', severity='warning')
+    bus.publish('error', 3.04, code='clap_degraded', severity='warning')
+    future.set_result(result())
+    feed(monitor, 190, 400)
+    assert not any(e.type == 'audio_observation' for e in events)
+    assert monitor.pending is None and monitor.ready is None and not monitor.buffer
+    bus.publish('status', 6.4, code='clap_restored')
+    bus.publish('status', 6.4, code='clap_restored')
+    feed(monitor, 400, 588)
+    observations = [e for e in events if e.type == 'audio_observation']
+    assert len(observations) == 1 and observations[0].data['start'] >= 6.4
+    assert len([e for e in events if e.data.get('code') == 'clap_monitor_paused']) == 1
+    assert len([e for e in events if e.data.get('code') == 'clap_monitor_resumed']) == 1
+    assert not any(e.type == 'sound' for e in events)
+    monitor.close()
