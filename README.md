@@ -31,6 +31,14 @@ Replace `1` with the input device index shown by `hb devices`, or omit `--device
 
 ## Configuration and integration
 
+For automatic spoken challenges after knock bursts or possible screams,
+shouts and crying, see [Automatic voice response](docs/VOICE-RESPONSE.md).
+The stationary mode uses `hb run --auto --profile clap-distress`; a working
+audio output and the CLAP service are required. Rover movement is a separate
+integration step.
+
+For a bounded USB GNSS connection/fix check, see [NEO-M9N GPS](docs/GPS.md).
+
 All operational settings and synthetic sound parameters are in `profiles/rubble.yaml`, with comments describing each value. `--profile` accepts a name or YAML path; custom profiles inherit omitted rubble settings, reject unknown defined keys, and preserve the reserved `dialog`, `prompter`, and `server` dictionaries for later stages.
 
 `AudioSource` yields 256-sample `AudioBlock(t0, x)` hops (the last file hop may be shorter). Audio is float32, mono, and within [-1, 1]. Stream time is derived from sample counts. The detector filters with a stateful second-order high-pass, estimates a rolling percentile noise floor, and emits each onset after its 15,600-sample raw-audio clip is available. Clips begin 100 ms before the detected onset, with zeros where a file boundary has no audio. Peak measures the first 50 ms of raw audio after the onset. Gates mark self-generated sounds without hiding them from the log.

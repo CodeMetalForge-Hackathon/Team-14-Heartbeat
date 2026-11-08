@@ -276,7 +276,7 @@ dialog:
   burst_window_s: 4.0
   # Quiet interval after a burst before an automatic challenge, in seconds.
   quiet_s: 1.5
-  # Start challenges automatically after a spontaneous burst when enabled.
+  # Automatically challenge after knock bursts or fresh enabled-monitor distress alerts.
   auto_challenge: false
   # Number of knocks in the first challenge round.
   first_pattern: 3

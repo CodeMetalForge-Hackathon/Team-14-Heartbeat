@@ -314,6 +314,11 @@ class DialogSession:
         self._jobs: queue.Queue[_PromptBatch | None] = queue.Queue()
         self._closing = threading.Event()
         self._ending = False
+        self._monitor_cfg = (pipeline.profile.classifier.clap or {}).get("monitor", {})
+        self._prompt_gate_until = 0.0
+        self._audio_epoch = 0.0
+        self._last_distress_response = -math.inf
+        self._unsubscribe_audio = pipeline.bus.subscribe(self._audio_event)
         self._worker_thread = threading.Thread(
             target=self._prompt_worker, name="heartbeat-prompts", daemon=True
         )
@@ -322,6 +327,54 @@ class DialogSession:
         pipeline.on_sound.append(self._sound)
         pipeline.on_block.append(self._block)
         pipeline.on_end.append(self._end)
+
+    def _audio_event(self, event) -> None:
+        if event.type == "prompt_start":
+            self._prompt_gate_until = math.inf
+        elif event.type == "prompt_end":
+            self._prompt_gate_until = event.t + self._tail
+        elif (event.type == "audio_observation"
+              and self.pipeline.profile.dialog["auto_challenge"]
+              and self._monitor_cfg.get("enabled")):
+            data = event.data
+            phrases = data.get("matched_phrases", [])
+            help_phrase = (self._monitor_cfg["asr"]["enabled"]
+                           and isinstance(phrases, list)
+                           and any(isinstance(p, str) and p.strip() for p in phrases))
+            if (data.get("alert") and data.get("possible_distress")
+                    and (data.get("label") in {"SCREAM", "SHOUT", "CRYING"} or help_phrase)):
+                generation = self._generation
+                self.pipeline.call_soon(lambda: self._respond_to_distress(event, generation))
+
+    def _respond_to_distress(self, event, generation) -> None:
+        """Request a check, never turn a vocal label into a knock or confirmation.
+
+        All decisions run at an audio block boundary. Patrol explicitly disables
+        auto_challenge and retains its separate STOP/settle/verify policy.
+        """
+        if (self._ending or self._closing.is_set() or generation != self._generation
+                or not self.pipeline.profile.dialog["auto_challenge"]):
+            return
+        self._initialize()
+        if (self.engine.state != "LISTENING" or self._active is not None
+                or self.engine._awaiting_prompts or self.engine._window is not None):
+            return
+        start, end, now = event.data.get("start"), event.t, self.pipeline.t
+        if (isinstance(start, bool) or not isinstance(start, (int, float))
+                or not math.isfinite(start) or not math.isfinite(end)
+                or not max(self._audio_epoch, self._prompt_gate_until) <= start <= end <= now
+                or now - end > self.pipeline.profile.classifier.clap["max_lag_s"]
+                or now - self._last_distress_response < self._monitor_cfg["cooldown_s"]):
+            return
+        _, errors = self._execute_command("challenge", {})
+        if not errors:
+            self._last_distress_response = now
+            self.pipeline.bus.publish(
+                "operator", now, source="audio_monitor", action="distress_challenge",
+                label=event.data.get("label"), score=event.data.get("score"),
+                start=start, end=end,
+                message="Possible distress: starting a knock-response check.",
+            )
 
     def _initialize(self) -> None:
         if self.engine is not None:
@@ -368,6 +421,7 @@ class DialogSession:
         if name == "reset" and not errors:
             self._generation += 1
             self._waiting.clear()
+            self._audio_epoch = self.pipeline.t
         self._actions(actions)
         if self._active is not None:
             self.engine.gate_until(math.inf)
@@ -495,6 +549,7 @@ class DialogSession:
 
     def close(self) -> None:
         self._closing.set()
+        self._unsubscribe_audio()
         self._jobs.put(None)
         self._worker_thread.join()
 
