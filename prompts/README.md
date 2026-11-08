@@ -26,6 +26,9 @@ The hookup guide is `docs/DEMO-HOOKUP.md`.
   start with [the migration handoff](../docs/NEW-PI-HANDOFF.md). Recovery is
   still pending; the preserved firmware HEX is included for the new host.
 
+**Demo polish** (on the laptop; it touches only `dashboard/`, so it can run alongside the Pi work):
+- **UI-01:** a command-post dashboard with a status hero, a call-and-response strip, a heartbeat-style trace, presentation mode and a route-schematic search map. Works offline; no fake GPS.
+
 Later prompts get written after we see these results:
 
 - P09: LoRa link, or a wireless (Wi-Fi) stick node
