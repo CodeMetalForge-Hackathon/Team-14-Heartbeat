@@ -107,6 +107,19 @@ void completeSegment(){
 int main(){
  for(int p=0;p<17;p++)mePort[p].s2=100+p;
  setup();
+ // Mechanical forward points toward the front sensor, with matching encoder signs.
+ reset();command("DRIVE 10 30");tick(20);
+ assert(leftDirection==-1 && rightDirection==1 && leftMotor.pwm<0 && rightMotor.pwm>0);
+ command("STOP");off();
+ reset();command("DRIVE -10 30");tick(20);
+ assert(leftDirection==1 && rightDirection==-1 && leftMotor.pwm>0 && rightMotor.pwm<0);
+ command("STOP");off();
+ reset();command("TURN 45 30");tick(20);
+ assert(leftDirection==1 && rightDirection==1 && leftMotor.pwm>0 && rightMotor.pwm>0);
+ command("STOP");off();
+ // The relocated sensor is explicitly selectable without changing motion direction.
+ reset();command("RANGE 6");off();assert(testedPin==106);
+ assert(Serial.out.str()=="RANGE port=6 cm=100.00 valid=1\n");
  // Stationary range reads the specified sensor, uses a bounded pulse wait, never moves.
  reset();command("RANGE 10");off();
  assert(testedPin==110 && testedTimeout==24000);
@@ -120,7 +133,7 @@ int main(){
  reset();configure();command("EXPLORE 601 30");off();
  // Forward -> obstacle STOP -> settled turn -> clear forward. No internal move ACKs.
  reset();start();tick(199);assert(!moving);tick(1);assert(moving && leftMotor.pwm==0);tick(20);
- assert(moving && navigationPhase==NAV_FORWARD && leftMotor.pwm>0 && leftMotor.pwm<5);
+ assert(moving && navigationPhase==NAV_FORWARD && leftMotor.pwm<0 && leftMotor.pwm>-5 && rightMotor.pwm>0);
  assert(desiredPwm(targetPulses-5)==maxPwm); // no final straight-drive power reduction
  testEcho=25*58;tick(80);assert(!moving && exploring && leftMotor.pwm==0 && rightMotor.pwm==0);
  assert(Serial.out.str().find("NAV OBSTACLE 25.00")!=std::string::npos);
@@ -155,9 +168,9 @@ int main(){
  reset();start();tick(200);Serial.clear();tick(1500);off();
  assert(Serial.out.str().find("ERR stall slots=1,2")==0);tick(200);off();
  // Movement completion still requires both wheels; the bounded tolerance is unchanged.
- reset();command("DRIVE 40 30");leftMotor.position=707;rightMotor.position=-705;loop();off();
+ reset();command("DRIVE 40 30");leftMotor.position=-707;rightMotor.position=705;loop();off();
  assert(Serial.out.str()=="OK DRIVE 40\n");
- reset();command("DRIVE 40 30");leftMotor.position=707;rightMotor.position=-704;loop();
+ reset();command("DRIVE 40 30");leftMotor.position=-707;rightMotor.position=704;loop();
  Serial.clear();tick(1500);off();assert(Serial.out.str().find("ERR stall slots=2")==0);
  // Other motor/config commands cannot hijack an active exploration in its waiting phase.
  reset();start();command("DRIVE 10 30");off();assert(Serial.out.str()=="ERR busy\n");

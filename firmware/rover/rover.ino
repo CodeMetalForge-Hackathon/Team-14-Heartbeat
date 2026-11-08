@@ -42,6 +42,10 @@ const float DEFAULT_DEG_PER_CM = 18.0f;
 const float DEFAULT_DEG_PER_TURN_DEG = 2.5f;
 const uint32_t CAL_MAGIC = 0x48425231UL;  // HBR1; changing record shape requires a new magic.
 
+// Mechanical orientation of this assembled Ranger: sensor-facing forward is
+// SLOT1 negative / SLOT2 positive. Encoder progress uses the same signed mapping.
+const int DRIVE_FORWARD_POLARITY = -1;
+
 MeEncoderOnBoard leftMotor(SLOT1);
 MeEncoderOnBoard rightMotor(SLOT2);
 MeRGBLed ring(0, RING_LEDS);
@@ -240,7 +244,8 @@ void startMove(bool isTurn, float amount, float speed, const char *echo) {
   previousLeft = startLeft; previousRight = startRight;
   targetPulses = pulses;
   leftDirection = amount > 0.0f ? 1 : -1;
-  // Standard Ranger wiring: forward uses opposite native encoder directions.
+  if (!isTurn) leftDirection *= DRIVE_FORWARD_POLARITY;
+  // Counter-mounted tracks use opposite native directions for straight travel.
   rightDirection = isTurn ? leftDirection : -leftDirection;
   maxPwm = speed * (255.0f / 100.0f);
   moveStartMs = lastControlMs = leftProgressMs = rightProgressMs = millis();

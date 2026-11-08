@@ -98,8 +98,12 @@ smaller than one encoder pulse returns `ERR resolution`.
 Makeblock's firmware. Verify it against a multimeter; it is not a calibrated
 measurement. `enc` reports signed wheel/output-shaft degrees since boot, rounded
 to whole degrees, in native SLOT1/SLOT2 directions. Positive driving runs SLOT1
-positive and SLOT2 negative. Positive turns run both slots positive. The physical
-forward and turn directions still need checking on the actual assembly.
+negative and SLOT2 positive, toward this assembled Ranger's ultrasonic sensor.
+This corrects the observed backward movement with the prior mapping.
+`DRIVE_FORWARD_POLARITY` is the firmware's mechanical orientation constant.
+Negative drives reverse both directions. Positive turns still run both slots
+positive. Check a short forward move after uploading before enabling exploration;
+turn direction and angles still need checking on the actual assembly.
 
 ## Calibration
 
@@ -243,10 +247,10 @@ Auriga globals. The local test toolchain uses that archive-link setting.
 
 ## Autonomous exploration
 
-See [ROVER-AUDIO](../../docs/ROVER-AUDIO.md#autonomous-local-exploration-ultrasonic-port-10)
+See [ROVER-AUDIO](../../docs/ROVER-AUDIO.md#autonomous-local-exploration-ultrasonic-port-6)
 for sensor validation and the CLAP exploration command. Navigation configuration
 comes from YAML through NAVCFG; there is no movement or retained navigation mode
-on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is on 10. Port 9's
+on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is now on 6. Port 9's
 line sensor is not used. EXPLORE requires configuration and lasts 1–600 seconds.
 It emits `NAV FORWARD <cm>`, `NAV TURN <cm>`, and `NAV OBSTACLE <cm>` progress lines.
 Internal DRIVE/TURN steps do not emit completion acknowledgements. STOP cancels

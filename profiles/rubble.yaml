@@ -494,7 +494,7 @@ rover:
   gap_timeout_s: 120.0
   navigation:
     # Confirmed ultrasonic connector; the line sensor on port 9 is unused.
-    sensor_port: 10
+    sensor_port: 6
     # Stop a forward segment when an obstacle is this close, in cm.
     stop_cm: 30
     # Require this much front clearance before starting a forward segment, in cm.

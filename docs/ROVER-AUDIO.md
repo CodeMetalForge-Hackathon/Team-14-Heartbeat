@@ -140,11 +140,16 @@ After a knock investigation, Resume skips the interrupted route leg as before;
 it does not replay an unknown remaining distance.
 
 
-## Autonomous local exploration (ultrasonic port 10)
+## Autonomous local exploration (ultrasonic port 6)
 
 `--explore` replaces the fixed route with bounded, reactive front-obstacle
-navigation. The confirmed wiring on this Ranger is ultrasonic **port 10**, line
-sensor **port 9**. The line sensor is unused. This mode provides no GPS position,
+navigation. The confirmed wiring on this Ranger is ultrasonic **port 6**, line
+sensor **port 9**. The line sensor is unused. Port 6 returned a valid distance
+after port 10 returned unknown; the reason for the original unknown is not established.
+The firmware's positive DRIVE direction is now mapped toward the ultrasonic
+sensor on this assembly. After uploading, test `drive 5 --speed 30` and verify
+actual forward travel before starting exploration. Encoder signs change together
+with motor direction; positive turns retain their previous motor mapping. This mode provides no GPS position,
 map, coverage guarantee, or return-to-start function. It cannot detect stairs,
 drops, side/rear obstacles, or every reflective/absorbent surface. Start on a
 level, unobstructed supervised test area with cable slack and access to STOP.
@@ -159,7 +164,7 @@ turn angles and coasting distance need testing before autonomous operation.
 First exit patrol (Ctrl+C) and measure a stationary target at two distances:
 
 ```bash
-uv run hb rover --port /dev/cu.usbserial-1130 range --sensor-port 10
+uv run hb rover --port /dev/cu.usbserial-1130 range --sensor-port 6
 ```
 
 Place a flat target around 20 cm ahead, then farther away and rerun. Check that
@@ -170,7 +175,7 @@ works. RANGE never starts the motors; do not run another serial owner beside it.
 Leave the CLAP service running with `profiles/clap-knocks.yaml`. Then run:
 
 ```bash
-uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 10 --explore-seconds 120 --knocker manual --dashboard --port 8001
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 6 --explore-seconds 120 --knocker manual --dashboard --port 8001
 ```
 
 The rover waits 200 ms, measures in front, and starts a 20 cm forward segment
