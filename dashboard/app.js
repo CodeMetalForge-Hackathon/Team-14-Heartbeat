@@ -15,6 +15,8 @@
   let busy = false, statePromise = null, reconnectTimer = null, pollTimer = null;
   let roverBusy = false, stopGeneration = 0, approvalGap = null;
   const patrolRows = new Map();
+  const stopImageCards = new Map();
+  let stopImagesRun = null;
   let connectionGeneration = 0;
   let levels = [], sounds = [], prompts = [], windows = [], activity = [];
   let now = 0, plot = null, paintQueued = false;
@@ -103,6 +105,47 @@
     row.cells[4].append(approve, approved);
     return row;
   }
+  function renderStopImages(decisions) {
+    byId("stop-images-panel").hidden = !decisions;
+    if (!decisions) return;
+    const gallery = byId("stop-images");
+    if (stopImagesRun !== state.run_id) {
+      stopImageCards.clear(); gallery.replaceChildren(); stopImagesRun = state.run_id;
+    }
+    const stops = decisions.stop_images || [], ids = new Set(stops.map(stop => stop.id));
+    byId("stop-images-empty").hidden = stops.length > 0;
+    for (const [id, card] of stopImageCards) {
+      if (!ids.has(id)) { card.remove(); stopImageCards.delete(id); }
+    }
+    stops.forEach((stop, index) => {
+      let card = stopImageCards.get(stop.id);
+      if (!card) {
+        card = document.createElement("figure");
+        card.className = "stop-image-card";
+        const title = document.createElement("strong");
+        title.textContent = `${stop.kind === "possible_debris" ? "Possible debris" : "Stopped scene"} · ${seconds(stop.stop_t)}`;
+        const status = document.createElement("p");
+        status.className = "stop-image-status";
+        if (stop.image_url) {
+          const link = document.createElement("a"), img = document.createElement("img");
+          link.href = stop.image_url; link.target = "_blank"; link.rel = "noopener";
+          link.setAttribute("aria-label", `Enlarge stop photo: ${stop.message}`);
+          img.alt = `${stop.kind === "possible_debris" ? "Possible debris flagged by the camera" : "Rover camera scene"}: ${stop.message}`;
+          img.addEventListener("error", () => { link.hidden = true; status.textContent = "Photo unavailable; it may have expired from recent stops."; });
+          img.src = stop.image_url;
+          link.append(img); card.append(link);
+          status.textContent = `Camera frame ${Number(stop.frame_age_s).toFixed(1)}s before this stop`;
+        } else {
+          status.textContent = "No camera frame was available at this stop.";
+        }
+        const caption = document.createElement("figcaption"), reason = document.createElement("p");
+        reason.textContent = stop.message;
+        caption.append(title, reason, status); card.append(caption);
+        stopImageCards.set(stop.id, card);
+      }
+      if (gallery.children[index] !== card) gallery.insertBefore(card, gallery.children[index] || null);
+    });
+  }
   function renderPatrol() {
     const patrol = state?.patrol, panel = byId("patrol-panel");
     panel.hidden = !patrol;
@@ -114,10 +157,12 @@
     const cue = patrol.verified_cue || patrol.trigger;
     text("patrol-audio", patrol.fault || (cue
       ? `${cue.label} · ${Number(cue.end).toFixed(1)}s · possible person; review evidence`
+      : patrol.decisions?.inspection_trigger === "debris_only" ? "Audio recorded · listening inspections start at camera-flagged debris"
       : patrol.audio_stop_enabled ? "Audio investigation enabled" : "Scheduled listening stops"));
     const battery = patrol.battery;
     text("patrol-battery", typeof battery === "number" && Number.isFinite(battery) && battery >= 0 ? `${battery.toFixed(2)} V` : "—");
     const decisions = patrol.decisions, decisionLine = byId("patrol-decisions");
+    renderStopImages(decisions);
     decisionLine.hidden = !decisions;
     if (decisions) {
       const parts = [decisions.armed ? "Guarded movement enabled" : "Observation only · movement disabled"];

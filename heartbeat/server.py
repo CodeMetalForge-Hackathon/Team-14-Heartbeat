@@ -22,7 +22,7 @@ import queue
 import threading
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .events import Event, to_jsonable
@@ -395,6 +395,14 @@ def create_app(pipeline, session, bus, *, cfg=None, run_id=None, profile=None,
         if not value:
             raise HTTPException(503, "Dialog state is not available yet")
         return decorate(value, state_seq)
+
+    @app.get("/api/stop-images/{image_id}")
+    def get_stop_image(image_id: str):
+        getter = getattr(patrol, "stop_image", None)
+        jpeg = getter(image_id) if getter is not None else None
+        if jpeg is None:
+            raise HTTPException(404, "Stop image is unavailable or no longer retained")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/events")
     async def get_events(since: int = 0, limit: int | None = None):

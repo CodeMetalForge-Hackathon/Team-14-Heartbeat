@@ -82,13 +82,16 @@ def bench(monkeypatch):
 
     def make(*, front=120, fail_step=False, budget=50, choice=None, confidence=1.0,
              continuous=False, exploration=False, turns=False, chunk=None,
-             battery=8, min_battery=None):
+             battery=8, min_battery=None, trigger='audio_and_vision', stop_images=8,
+             jpeg=None):
         profile = load_profile('pi-full-check')
         cfg = profile.rover
         cfg['settle_s'] = .01
         cfg['decisions'].update(forward_budget_cm=budget, session_s=60, continuous_forward=continuous,
                                 autonomous_exploration=exploration, cruise_chunk_cm=chunk,
                                 min_battery_v=min_battery,
+                                inspection_trigger=trigger,
+                                stop_image_history_size=stop_images,
                                 min_confidence=.7,
                                 decision_interval_s=.01, action_settle_s=0, hold_s=.01)
         profile = replace(profile, dialog={**profile.dialog, 'auto_challenge': False})
@@ -106,7 +109,8 @@ def bench(monkeypatch):
 
         def capture(**kwargs):
             sequence[0] += 1
-            return SimpleNamespace(jpeg=b'fake-jpeg', captured_monotonic=clock[0], sequence=sequence[0])
+            image = jpeg(sequence[0]) if jpeg is not None else b'fake-jpeg'
+            return SimpleNamespace(jpeg=image, captured_monotonic=clock[0], sequence=sequence[0])
 
         def choose(frame, telemetry, allowed):
             rover.observations.append((dict(telemetry), list(allowed)))
@@ -286,7 +290,8 @@ def test_missing_range_still_requires_review_outside_exploration(bench):
 
 @pytest.mark.parametrize('front', [-1, 20, 120])
 def test_visual_inspection_can_stop_at_any_range_without_motion(bench, front):
-    controller, rover, tick = bench(front=front, exploration=True, choice='INSPECT_DEBRIS')
+    controller, rover, tick = bench(front=front, exploration=True, choice='INSPECT_DEBRIS',
+                                   trigger='debris_only')
     for _ in range(100):
         tick()
         if controller.state in {'SETTLING', 'VERIFYING'}:
@@ -358,6 +363,7 @@ def test_exploration_profile_has_finite_budgets_and_continuous_chunks():
     assert profile.rover['navigation']['sensor_port'] == 10
     assert load_profile('pi-full-check').rover['navigation']['sensor_port'] == 10
     assert cfg['autonomous_exploration'] and cfg['continuous_forward']
+    assert cfg['inspection_trigger'] == 'debris_only'
     assert cfg['cruise_chunk_cm'] == 20
     assert cfg['forward_budget_cm'] == 100 and cfg['session_s'] == 120
 
@@ -398,6 +404,8 @@ def test_exploration_waits_for_battery_recovery_before_forward_travel(bench):
     controller, rover, tick = bench(exploration=True, battery=6.9, min_battery=7)
     for _ in range(100):
         tick()
+        if controller.snapshot()['decisions']['reason']=='low_battery':
+            break
     assert not rover.steps and not rover.cruises and not rover.pivots
     assert all(allowed == ['HOLD', 'STOP_AND_LISTEN', 'INSPECT_DEBRIS'] for _, allowed in rover.observations)
     assert controller.snapshot()['decisions']['reason'] == 'low_battery'
@@ -431,3 +439,151 @@ def test_stop_reason_is_printed_by_the_console_and_kept_in_snapshot(bench,capsys
             break
     assert 'Camera flagged possible debris' in capsys.readouterr().out
     assert 'Camera flagged possible debris' in controller.snapshot()['decisions']['stop_message']
+
+
+@pytest.mark.parametrize('phase', ['MOVING', 'OBSERVING', 'DECIDING', 'HOLDING'])
+def test_debris_only_ignores_knocks_and_distress_in_every_navigation_phase(bench,phase):
+    controller, rover, tick = bench(exploration=True, continuous=True, chunk=20,
+                                   trigger='debris_only')
+    for _ in range(350):
+        tick()
+    assert rover.cruises and not rover.cruise_canceled
+    controller.state=phase
+    pipeline=controller.pipeline
+    pipeline.bus.publish('sound',pipeline.t-.9,is_knock=True,gated=True,score=.99,classifier='clap')
+    pipeline.bus.publish('audio_observation',pipeline.t,start=pipeline.t-3,label='SCREAM',
+                         score=.99,possible_distress=True,matched_phrases=[],transcript='',alert=True)
+    pipeline.bus.publish('error',pipeline.t,where='audio_monitor',message='Observation request timed out')
+    controller._request_audio_stop({'label':'KNOCK_BURST','end':pipeline.t,'start':pipeline.t-1})
+    assert controller.state==phase
+    assert controller._trigger is None
+    assert not rover.cruise_canceled
+    assert 'STOP_AND_LISTEN' not in controller._allowed_actions(120)
+    assert 'INSPECT_DEBRIS' in controller._allowed_actions(120)
+
+
+def test_debris_only_still_collects_fresh_knocks_after_a_visual_debris_stop(bench):
+    controller, rover, tick = bench(exploration=True, trigger='debris_only',choice='INSPECT_DEBRIS')
+    for _ in range(100):
+        tick()
+        if controller.state=='VERIFYING':
+            break
+    assert controller.state=='VERIFYING'
+    for _ in range(200):
+        tick()
+    pipeline=controller.pipeline
+    pipeline.bus.publish('sound',pipeline.t-.9,is_knock=True,gated=True,score=.99,classifier='clap')
+    assert controller._verified_cue['label']=='KNOCK_BURST'
+    assert not rover.steps and not rover.cruises
+
+
+def test_debris_only_resume_checks_camera_without_starting_an_audio_investigation(bench):
+    controller, rover, tick = bench(exploration=True, trigger='debris_only',front=-1)
+    for _ in range(50):
+        tick()
+    assert controller.command('pause')['ok']
+    for _ in range(50):
+        tick()
+    assert controller.state=='PAUSED'
+    phases=[]
+    controller.pipeline.bus.subscribe(lambda e:phases.append(e.data['state']) if e.type=='patrol' else None)
+    assert controller.command('resume')['ok']
+    for _ in range(100):
+        tick()
+    assert controller.state in {'OBSERVING','DECIDING','HOLDING'}
+    assert not {'SETTLING','VERIFYING','LISTENING'} & set(phases)
+    assert not rover.steps
+
+
+@pytest.mark.parametrize('trigger', ['invalid',None,[]])
+def test_invalid_inspection_policy_is_rejected(trigger):
+    cfg={**load_profile('pi-explore').rover['decisions'],'inspection_trigger':trigger}
+    with pytest.raises(ValueError,match='inspection_trigger'):
+        validate_decision_settings(cfg)
+
+
+def test_debris_stop_freezes_the_decision_frame_once_without_bytes_in_events(bench):
+    import json
+    controller, rover, tick = bench(exploration=True, trigger='debris_only',
+                                   choice='INSPECT_DEBRIS', jpeg=lambda n: f'frame-{n}'.encode())
+    events = []
+    controller.pipeline.bus.subscribe(lambda event: events.append(event.to_dict()))
+    for _ in range(150):
+        tick()
+        if controller.state == 'VERIFYING':
+            break
+    assert controller.state == 'VERIFYING'
+    stops = controller.snapshot()['decisions']['stop_images']
+    assert len(stops) == 1
+    stop = stops[0]
+    assert stop['reason'] == 'debris_detected' and stop['kind'] == 'possible_debris'
+    assert stop['image_url'] == f"/api/stop-images/{stop['id']}"
+    assert 0 <= stop['frame_age_s'] < 1
+    assert controller.stop_image(stop['id']) == f"frame-{stop['frame_sequence']}".encode()
+    assert 'frame-' not in json.dumps(events)
+    assert controller.stop_image('unknown') is None
+    assert not rover.steps
+
+
+def test_recent_stops_keep_their_own_frames_and_evict_old_images(bench):
+    controller, rover, tick = bench(exploration=True, stop_images=2,
+                                   jpeg=lambda n: f'frame-{n}'.encode())
+    for _ in range(100):
+        tick()
+        stops = controller.snapshot()['decisions']['stop_images']
+        if stops:
+            break
+    first = stops[0]
+    first_jpeg = controller.stop_image(first['id'])
+    assert first['kind'] == 'scene'
+    assert 'debris' not in first['message'].lower()
+    for _ in range(100):
+        tick()
+        stops = controller.snapshot()['decisions']['stop_images']
+        if len(stops) == 2:
+            break
+    assert controller.stop_image(first['id']) == first_jpeg
+    assert controller.stop_image(stops[0]['id']) != first_jpeg
+    for _ in range(100):
+        tick()
+        stops = controller.snapshot()['decisions']['stop_images']
+        if first['id'] not in {stop['id'] for stop in stops}:
+            break
+    assert len(stops) == 2
+    assert controller.stop_image(first['id']) is None
+    assert stops[0]['stop_t'] >= stops[1]['stop_t']
+    for stop in stops:
+        assert controller.stop_image(stop['id']) == f"frame-{stop['frame_sequence']}".encode()
+
+
+def test_stationary_range_retries_do_not_fill_the_stop_gallery(bench):
+    controller, rover, tick = bench(exploration=True, front=-1)
+    for _ in range(150):
+        tick()
+    assert len(rover.observations) > 3
+    stops = controller.snapshot()['decisions']['stop_images']
+    assert len(stops) == 1
+    assert stops[0]['reason'] == 'waiting_for_range'
+    assert not rover.steps and not rover.cruises
+
+
+def test_stop_before_first_camera_frame_reports_photo_unavailable(bench):
+    controller, rover, tick = bench(exploration=True)
+    assert controller.command('pause')['ok']
+    for _ in range(50):
+        tick()
+        if controller.state == 'PAUSED':
+            break
+    assert controller.state == 'PAUSED'
+    stop = controller.snapshot()['decisions']['stop_images'][0]
+    assert stop['reason'] == 'operator_pause'
+    assert controller.snapshot()['decisions']['status_message'] == 'Stopped: Exploration paused by operator'
+    assert stop['image_url'] is None and stop['frame_age_s'] is None
+    assert controller.stop_image(stop['id']) is None
+
+
+@pytest.mark.parametrize('limit', [0, -1, True, 1.5, None])
+def test_stop_image_history_limit_must_be_a_positive_integer(limit):
+    cfg = {**load_profile('pi-explore').rover['decisions'], 'stop_image_history_size': limit}
+    with pytest.raises(ValueError, match='stop_image_history_size'):
+        validate_decision_settings(cfg)

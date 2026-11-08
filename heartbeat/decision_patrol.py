@@ -14,6 +14,7 @@ import math
 import queue
 import threading
 from time import monotonic
+from uuid import uuid4
 
 from .camera import CameraError
 from .decisions import DecisionsError
@@ -46,10 +47,17 @@ def validate_decision_settings(settings):
     cfg = deepcopy(dict(settings))
     cfg.setdefault("continuous_forward", False)
     cfg.setdefault("autonomous_exploration", False)
+    cfg.setdefault("inspection_trigger", "audio_and_vision")
+    cfg.setdefault("stop_image_history_size", cfg.get("history_size"))
     if not isinstance(cfg["continuous_forward"], bool):
         raise ValueError("rover.decisions.continuous_forward must be boolean")
     if not isinstance(cfg["autonomous_exploration"], bool):
         raise ValueError("rover.decisions.autonomous_exploration must be boolean")
+    if (not isinstance(cfg["inspection_trigger"], str)
+            or cfg["inspection_trigger"] not in {"audio_and_vision", "debris_only"}):
+        raise ValueError("inspection_trigger must be audio_and_vision or debris_only")
+    if cfg["inspection_trigger"] == "debris_only" and not cfg["autonomous_exploration"]:
+        raise ValueError("debris_only requires autonomous_exploration")
     positive = ("session_s", "observation_max_age_s", "decision_interval_s", "hold_s",
                 "forward_cm", "turn_deg", "speed_pct", "worker_join_s")
     try:
@@ -79,7 +87,7 @@ def validate_decision_settings(settings):
             raise ValueError("rover.decisions action distances exceed the guarded protocol")
         if not 1 <= cfg["speed_pct"] <= 60:
             raise ValueError("rover.decisions.speed_pct must be between 1 and 60")
-        for key in ("max_action_ms", "history_size"):
+        for key in ("max_action_ms", "history_size", "stop_image_history_size"):
             if isinstance(cfg[key], bool) or not isinstance(cfg[key], int) or cfg[key] < 1:
                 raise ValueError(f"rover.decisions.{key} must be a positive integer")
         if cfg["max_action_ms"] > 2000:
@@ -141,6 +149,10 @@ class DecisionsPatrol(Patrol):
         self._request_counter = 0
         self._last_frame_sequence = -1
         self._last_frame_at = None
+        self._last_frame = None
+        self._stop_images_lock = threading.Lock()
+        self._stop_images = deque(maxlen=decisions["stop_image_history_size"])
+        self._image_stop_reason = None
         self._last_front_cm = None
         self._last_action = None
         self._confidence = None
@@ -161,6 +173,7 @@ class DecisionsPatrol(Patrol):
         self._last_motion_error = None
         self._last_stop_reason = None
         self._last_stop_message = None
+        self._debris_inspection_active = False
         super().__init__(rover, pipeline, engine, prompter,
                          [{"name": "Decision search 1", "moves": []}], cfg)
         self._observation_thread = threading.Thread(
@@ -183,8 +196,40 @@ class DecisionsPatrol(Patrol):
             "status_message": self._status_message(),
             "stop_reason": self._last_stop_reason,
             "stop_message": self._last_stop_message,
+            "inspection_trigger": self.decision_cfg["inspection_trigger"],
+            "stop_images": self._stop_image_metadata(),
         }
         return snap
+
+    def _stop_image_metadata(self):
+        with self._stop_images_lock:
+            return [dict(metadata) for metadata, _ in reversed(self._stop_images)]
+
+    def stop_image(self, image_id):
+        """Return a retained JPEG through a side channel, never the event bus."""
+        with self._stop_images_lock:
+            return next((jpeg for metadata, jpeg in self._stop_images
+                         if metadata["id"] == image_id), None)
+
+    def _remember_stop_image(self, reason):
+        # Repeated HOLD observations are retries at one stopped position.
+        # Preserve its original evidence instead of filling the gallery.
+        if reason == self._image_stop_reason:
+            return
+        self._image_stop_reason = reason
+        image_id = uuid4().hex
+        frame = self._last_frame
+        captured, sequence, jpeg = frame if frame is not None else (None, None, None)
+        metadata = {
+            "id": image_id, "stop_t": float(self.pipeline.t), "reason": reason,
+            "message": self._reason_message(reason),
+            "kind": "possible_debris" if reason == "debris_detected" else "scene",
+            "image_url": f"/api/stop-images/{image_id}" if jpeg is not None else None,
+            "frame_sequence": sequence,
+            "frame_age_s": None if captured is None else max(0.0, monotonic() - captured),
+        }
+        with self._stop_images_lock:
+            self._stop_images.append((metadata, jpeg))
 
     def _reason_message(self, reason):
         if reason == "classified_audio_cue":
@@ -206,6 +251,8 @@ class DecisionsPatrol(Patrol):
             "forward_budget_exhausted": "Forward distance budget reached",
             "motion_disarmed": "Observation mode; movement is disabled",
             "operator_resume_verification": "Operator resumed; checking fresh audio before exploring",
+            "operator_resume_observation": "Operator resumed; checking camera and distance before exploring",
+            "operator_pause": "Exploration paused by operator",
             "aborted": "Exploration stopped by operator",
             "estop": "Emergency stop latched",
             "done": "Exploration complete",
@@ -218,6 +265,8 @@ class DecisionsPatrol(Patrol):
         }.get(reason, str(reason).replace("_", " "))
 
     def _status_message(self):
+        if self.state == "PAUSED":
+            return "Stopped: " + self._reason_message("operator_pause")
         if self.state == "MOVING":
             if self._cruise_active:
                 return "Exploring forward"
@@ -240,6 +289,18 @@ class DecisionsPatrol(Patrol):
             self._history[-1]["outcome"] = outcome
 
     def _emit_state(self, state):
+        if state == "MOVING":
+            self._image_stop_reason = None
+        # Freeze the decision frame once per stop transition. STOPPING's
+        # acknowledgement must not create a second copy of the same stop.
+        if (state == "STOPPING" and self.state != "STOPPING"
+                or state == "HOLDING" and self._last_frame is not None
+                and self.state not in {"STOPPING", "HOLDING"}
+                or state in {"PAUSED", "ESTOP", "ABORTED", "FAULT", "DONE"}
+                and self.state not in {state, "STOPPING"}):
+            reason = {"PAUSED": "operator_pause", "ESTOP": "estop", "ABORTED": "aborted"}.get(
+                state, self._decision_reason)
+            self._remember_stop_image(reason)
         # A full onset clip is nearly a second. Resetting this boundary for
         # every short capture/action would permanently starve knock detection.
         if self.state in NAVIGATION_STATES and state in NAVIGATION_STATES:
@@ -289,6 +350,7 @@ class DecisionsPatrol(Patrol):
         super()._start()
 
     def _new_search_gap(self):
+        self._debris_inspection_active = False
         if self.gap_index >= 0:
             self.route.append({"name": f"Decision search {len(self.route) + 1}", "moves": []})
         self.gap_index += 1
@@ -335,7 +397,8 @@ class DecisionsPatrol(Patrol):
         return minimum is None or (_finite_number(voltage) and voltage >= minimum)
 
     def _allowed_actions(self, front_cm, battery=None):
-        choices = list(STATIONARY_ACTIONS)
+        choices = (["HOLD"] if self.decision_cfg["inspection_trigger"] == "debris_only"
+                   else list(STATIONARY_ACTIONS))
         if self.decision_cfg["autonomous_exploration"]:
             choices.append("INSPECT_DEBRIS")
         if not _finite_number(front_cm) or not 2 <= front_cm <= 400 or not self._battery_ready(battery):
@@ -435,6 +498,7 @@ class DecisionsPatrol(Patrol):
         telemetry = {"front_cm": front, "range_valid": range_valid,
                      "moving": self._cruise_active, "armed": self.armed,
                      "autonomous_exploration": self.decision_cfg["autonomous_exploration"],
+                     "inspection_trigger": self.decision_cfg["inspection_trigger"],
                      "continuous_forward": self.decision_cfg["continuous_forward"],
                      "continuous_target_in_progress": self._cruise_active,
                      "allow_turns": self.allow_turns, "steps": self._steps,
@@ -452,7 +516,7 @@ class DecisionsPatrol(Patrol):
         if monotonic() - observed > self.decision_cfg["observation_max_age_s"]:
             raise _ObservationError("Camera or range observation expired before the decision request")
         allowed = self._allowed_actions(front, telemetry.get("battery", self.battery))
-        self.pipeline.call_soon(lambda: self._frame_ready(pending, captured, sequence, telemetry))
+        self.pipeline.call_soon(lambda: self._frame_ready(pending, captured, sequence, telemetry, jpeg))
         try:
             result = self.client.choose(frame, telemetry, allowed)
         except DecisionsError as exc:
@@ -486,13 +550,14 @@ class DecisionsPatrol(Patrol):
                 self._observation_active.clear()
             self.pipeline.call_soon(lambda p=pending, v=value, e=error: self._observation_ready(p, v, e))
 
-    def _frame_ready(self, pending, captured, sequence, telemetry):
+    def _frame_ready(self, pending, captured, sequence, telemetry, jpeg):
         if not self._current_observation(pending):
             return
         if monotonic() - captured > self.decision_cfg["observation_max_age_s"]:
             self._review_failure("Camera observation expired while waiting for processing")
             return
         self._last_frame_at, self._last_frame_sequence = captured, sequence
+        self._last_frame = (captured, sequence, jpeg)
         pending["deadline"] = min(pending["deadline"], captured + self.decision_cfg["observation_max_age_s"])
         self._last_front_cm = telemetry["front_cm"]
         if "battery" in telemetry:
@@ -555,6 +620,7 @@ class DecisionsPatrol(Patrol):
         elif confidence < self.decision_cfg["min_confidence"]:
             self._hold("low_confidence", pending["after"])
         elif action in {"STOP_AND_LISTEN", "INSPECT_DEBRIS"}:
+            self._debris_inspection_active = action == "INSPECT_DEBRIS"
             self._record_outcome("stop_and_listen")
             self._verification_for_resume = False
             self._request_navigation_stop("investigate", "debris_detected" if
@@ -691,7 +757,8 @@ class DecisionsPatrol(Patrol):
             self._request_navigation_stop("resume", "prompt_interrupted_navigation")
             return
         if event.type == "error" and event.data.get("where") == "audio_monitor":
-            if self.state in NAVIGATION_STATES:
+            if (self.state in NAVIGATION_STATES
+                    and self.decision_cfg["inspection_trigger"] != "debris_only"):
                 self._review_failure("Audio monitoring failed during decision navigation")
             return
         if self.state in NAVIGATION_STATES - {"MOVING"}:
@@ -699,7 +766,17 @@ class DecisionsPatrol(Patrol):
             if cue is not None:
                 self._request_audio_stop(cue)
 
+    def _audio_cue(self, event):
+        if self.decision_cfg["inspection_trigger"] == "debris_only":
+            # Keep recording/classification active. Only evidence collected
+            # after the camera selected a debris site can enter its interview.
+            if not self._debris_inspection_active or self.state not in {"VERIFYING", "LISTENING"}:
+                return None
+        return super()._audio_cue(event)
+
     def _request_audio_stop(self, cue):
+        if self.decision_cfg["inspection_trigger"] == "debris_only":
+            return
         if self._halted or self.done or self.state not in NAVIGATION_STATES:
             return
         self._trigger = cue
@@ -840,6 +917,12 @@ class DecisionsPatrol(Patrol):
         self._paused_phase = None
         self._pending_result = None
         self.pipeline.bus.publish("operator", self.pipeline.t, command="resume", source="patrol")
+        if self.decision_cfg["inspection_trigger"] == "debris_only":
+            self._debris_inspection_active = False
+            self._engine_command("reset")
+            self._verification_for_resume = False
+            self._request_navigation_stop("hold", "operator_resume_observation", expected_generation=generation)
+            return
         self._verification_for_resume = True
         self._request_navigation_stop("resume", "operator_resume_verification", expected_generation=generation)
 

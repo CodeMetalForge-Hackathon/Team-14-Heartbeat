@@ -4,6 +4,34 @@ Decisions receives a fresh camera frame and rover observations, then recommends
 one finite action. Local code validates the choice and owns every motor command.
 Only the deterministic challenge–response dialog can report `CONFIRMED`.
 
+The rover dashboard's **Camera at each stop** gallery updates automatically with
+the camera frame used for a stop decision, its reason, and the frame's age at
+the stop. Camera-flagged debris is labeled **Possible debris**; other stops show
+**Stopped scene**. Click a photo to enlarge it. Stops before the first camera
+frame explicitly report that no photo is available. The latest eight stop
+snapshots are retained in memory (`rover.decisions.stop_image_history_size`).
+Retries for the same condition while already stopped share one card. A new
+movement or stop reason creates another card. Restarting the patrol clears
+the gallery. JPEGs are served separately from event JSON
+at `/api/stop-images/{id}` and are not saved in the black-box recording.
+
+If a stop card says **Distance reading unavailable; retrying the sensor**, the
+caption reports a sonar hold, not a debris detection. `cm=-1 valid=0` is an
+unusable echo; the firmware does not report it as an unobstructed path. With
+the rover stopped, reseat the ultrasonic module's RJ25 cable at both ends,
+check controller power and sensor alignment, and use the configured port 10.
+[Makeblock's Auriga port guide](https://support.makeblock.com/hc/en-us/articles/4412149618327-About-Me-Auriga)
+lists ports 6–10 as compatible with the ultrasonic module. A brief check with
+a box in front distinguishes a missing echo in the current scene from a
+connection problem; a diagnostic target is not required during exploration.
+If the same setup still has no return, try another RJ25 cable, then a known
+working module or supported port. Do not run this command while patrol owns
+the serial device:
+
+```bash
+uv run hb rover --port /dev/ttyUSB0 range --sensor-port 10
+```
+
 **The Pi 5 does not need to be connected to build this feature.** Hardware is
 needed to run it. The current encoder disagreement and intermittent ultrasonic
 readings remain unresolved: keep motion unarmed until those faults are resolved.
@@ -116,7 +144,7 @@ while building this feature.
 ### Camera-guided autonomous exploration
 
 Use `pi-explore` for exploration with camera decisions, ultrasonic avoidance,
-audio investigation and the dashboard together. It keeps the 30 cm front motor
+audio evidence and the dashboard together. It keeps the 30 cm front motor
 cutoff and 45 cm forward-start requirement. Unlike the forward-only
 `pi-full-check` test, it supports short turns after an acknowledged STOP and a
 new camera/range observation. Turning still requires `--allow-turns` and physical
@@ -129,13 +157,18 @@ describe the old wiring; an explicit `--sensor-port 6` would override the fix.
 
 The mission requests `INSPECT_DEBRIS` when the camera recognizes debris or a
 rubble pile at any distance. This is a model recommendation, not a validated
-debris detector. It cannot confirm a survivor. Ordinary obstacles can trigger
+debris detector. It cannot confirm a survivor. With `inspection_trigger: debris_only`,
+only this explicit visual choice starts a listening investigation. Knocks,
+screams, other sounds and a visible person alone do not interrupt exploration
+to start listening. Audio remains recorded/classified; fresh audio is still
+used after the rover has stopped at a camera-selected debris site. Ordinary obstacles can trigger
 a stop, reobservation, a permitted turn and continued exploration. Stall,
 communication, STOP, camera and API failures still require review.
 
 An explicit `cm=-1 valid=0` reply now keeps the camera and audio active while
 the rover remains stopped and retries. Only HOLD, STOP_AND_LISTEN and INSPECT_DEBRIS
-are offered with an unknown distance. A valid echo can restore motion choices automatically;
+are offered with an unknown distance in the legacy policy. The debris-only
+policy offers HOLD and INSPECT_DEBRIS. A valid echo can restore motion choices automatically;
 a broken sensor cannot be made safe by assuming that no echo means open space.
 No flat calibration target is a runtime prerequisite. Terminal output, dashboard
 status and event logs include readable reasons for stops. A distinct
@@ -282,8 +315,10 @@ profile, including its mission and action descriptions. It does not log raw
 camera images, complete API request bodies or API keys. Camera frames are sent
 to the Decisions API; this is not an offline mode.
 
-No tests were created or run for this work. Validation is limited to source
-review, syntax checks and firmware compilation; no upload, physical run or live
-Decisions request was performed. Camera operation, model/API latency, network reachability,
-sensor behavior and braking remain unvalidated on the assembled rover. This
-feature provides no mapping, systematic coverage or return-to-start guarantee.
+Hardware-free controller and dashboard tests cover the movement gates, debris-only
+inspection policy, stop-image retention and image endpoint. Live Pi recordings
+and their limitations are documented in [the exploration evidence](evidence/20261108-autonomous-exploration.json)
+and [the debris-only policy check](evidence/20261108-debris-only-policy.json).
+Debris recognition accuracy, braking distance and encoder travel accuracy remain
+unvalidated. This feature provides no mapping, systematic coverage or
+return-to-start guarantee.

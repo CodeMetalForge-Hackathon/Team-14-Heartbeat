@@ -1,0 +1,53 @@
+{
+  "recorded_at": "2026-11-08T12:28:45.601732+00:00",
+  "policy": "debris_only",
+  "source_run": "runs/debris-only-live-20261108-o92bZy",
+  "recording_status": "closed; black-box integrity verified",
+  "audio_before_visual_inspection": {
+    "sound_events": 6,
+    "accepted_knock_candidates": 2,
+    "vocal_observations": 24
+  },
+  "visual_inspection_requested_at": 27.6,
+  "audio_triggered_navigation_stops": 0,
+  "stop_reasons": [
+    {
+      "t": 27.6,
+      "reason": "debris_detected",
+      "message": "Stopping: Camera flagged possible debris; inspecting and listening"
+    },
+    {
+      "t": 74.656,
+      "reason": "session_budget_expired",
+      "message": "Stopping: Exploration time limit reached"
+    }
+  ],
+  "fresh_audio_evidence_after_visual_stop": [
+    {
+      "t": 31.76,
+      "label": "KNOCK_BURST",
+      "phase": "verification"
+    }
+  ],
+  "software_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "957",
+      "time": "169.254",
+      "timestamp": "2026-11-08T07:24:03.448425-05:00",
+      "hostname": "raspberrypi"
+    }
+  ],
+  "limitations": [
+    "Camera debris classification has not been independently validated."
+  ],
+  "integrity_verification": {
+    "command": "uv run --no-sync hb verify runs/debris-only-live-20261108-o92bZy",
+    "result": "OK",
+    "events": 1155,
+    "clips": 51
+  }
+}

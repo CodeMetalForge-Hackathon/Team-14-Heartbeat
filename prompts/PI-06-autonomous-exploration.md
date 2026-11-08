@@ -23,3 +23,23 @@ one forward step. They requested readable reasons in the terminal and dashboard
 for each stop, such as debris detection or an obstacle requiring another route.
 Distinguish an explicit visual debris choice from generic HOLD, confidence,
 audio, sensor and operator stop reasons. Do not claim that HOLD proves debris.
+
+Follow-up: "hey I want it to stop and listen only where there is debris not when
+it hears sound". Configure pi-explore so only an explicit camera debris choice
+starts the listening procedure. Preserve audio recording and stationary evidence
+collection after arriving at debris, along with obstacle/fault/operator stops.
+
+Follow-up: "hey can you do one thing in the dashboard each time it stps gimme
+the image of debris". Add the camera frame and stop reason to the rover dashboard
+for each stop. Keep a bounded recent history; distinguish possible debris from
+other stopped scenes and keep image bytes out of event JSON.
+
+Follow-up: "hey I got distance rerading unavalable retrying the sensor for all
+the images ? how do I fix that ?". Diagnose the ultrasonic readings with motors
+stopped, explain the wiring checks, and avoid creating a gallery card for every
+retry at the same stopped position.
+
+Follow-ups: "hey now please re run I wanna see resuls again" and "how can I test
+the distance sensor on the rover?". Rerun the full live exploration pipeline,
+report the actual result, then provide the standalone RANGE command and expected
+valid/invalid readings for the current Pi and sensor port.

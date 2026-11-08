@@ -106,6 +106,15 @@ button:hover:not(:disabled) { background: rgba(237,242,241,.13); border-color: v
 .patrol-panel[data-phase="ESTOP"] #patrol-state, .patrol-panel[data-phase="ABORTED"] #patrol-state { color: var(--rescue); }
 .patrol-panel[data-phase="PAUSED"] #patrol-state { color: var(--caution); }
 .patrol-warning { margin: 0 22px 20px; padding: 11px 13px; border-left: 3px solid var(--caution); background: rgba(241,193,103,.08); color: var(--caution); font-size: 12px; line-height: 1.6; }
+.stop-images-panel { border-top: 1px solid var(--line); margin-block: 18px; }
+.stop-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; padding: 0 22px; }
+.stop-image-card { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; }
+.stop-image-card a { display: block; }
+.stop-image-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: var(--ink); }
+.stop-image-card figcaption { padding: 12px; font-size: 12px; line-height: 1.5; }
+.stop-image-card p { margin: 6px 0 0; }
+.stop-image-card .stop-image-status, .stop-images-empty { color: var(--slate); font-size: 11px; }
+.stop-images-empty { margin: 0 22px; }
 .patrol-table { min-width: 700px; }
 .patrol-table td { vertical-align: top; font-size: 11px; }
 .patrol-table td:first-child { font-weight: 600; min-width: 110px; }

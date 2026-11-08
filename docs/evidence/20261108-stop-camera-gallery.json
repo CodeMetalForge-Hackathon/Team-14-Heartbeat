@@ -1,0 +1,230 @@
+{
+  "recorded_at": "2026-11-08T12:47:45.330899+00:00",
+  "feature": "Stop camera gallery and debris-only listening",
+  "software_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "968",
+      "time": "210.513",
+      "timestamp": "2026-11-08T07:43:08.753698-05:00",
+      "hostname": "raspberrypi"
+    }
+  ],
+  "live_snapshot": {
+    "run": "runs/explore-rerun-20261108-Mc2E2c",
+    "state": "REVIEW",
+    "motion_armed": true,
+    "photos": [
+      {
+        "id": "da5312a5a38e4ef782a1cdd74f9d03c7",
+        "stop_t": 29.232,
+        "reason": "Decisions request timed out",
+        "message": "Decisions request timed out",
+        "kind": "scene",
+        "image_url": "/api/stop-images/da5312a5a38e4ef782a1cdd74f9d03c7",
+        "frame_sequence": 119,
+        "frame_age_s": 1.6156125609995797,
+        "jpeg_bytes": 8933,
+        "sha256": "ce9a6dc2b4909c1ea3c50bd66ce0153e7ad1a0b08aea3806395925ed16846b4b"
+      },
+      {
+        "id": "63008f3906c74d2d94f6bc96f5de7b90",
+        "stop_t": 4.368,
+        "reason": "waiting_for_range",
+        "message": "Distance reading unavailable; retrying the sensor",
+        "kind": "scene",
+        "image_url": "/api/stop-images/63008f3906c74d2d94f6bc96f5de7b90",
+        "frame_sequence": 1,
+        "frame_age_s": 0.34521523599960346,
+        "jpeg_bytes": 10304,
+        "sha256": "7bb0a4e67d6159ced31de675995a4ebf0106caa07e1aa53d87caed0d74f74ad1"
+      }
+    ],
+    "held_decisions": 24
+  },
+  "browser_check": {
+    "page_loaded": true,
+    "real_camera_images_rendered": true,
+    "screenshot": "runs/stop-gallery-check-20261108-wKAwLZ/dashboard.png"
+  },
+  "closed_recordings_verified": [
+    {
+      "run": "runs/stop-images-live-20261108-xxQKgj",
+      "events": 409,
+      "clips": 5
+    },
+    {
+      "run": "runs/stop-gallery-check-20261108-wKAwLZ",
+      "events": 222,
+      "clips": 22
+    }
+  ],
+  "ultrasonic_check": {
+    "at": "2026-11-08T12:41:40.965192+00:00",
+    "serial_port": "/dev/serial/by-path/platform-xhci-hcd.1-usbv2-0:1:1.0-port0",
+    "motion_requested": false,
+    "readings": [
+      {
+        "sensor_port": 10,
+        "readings": [
+          {
+            "kind": "RANGE",
+            "port": 10,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=10 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 10,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=10 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 10,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=10 cm=-1.00 valid=0"
+          }
+        ]
+      },
+      {
+        "sensor_port": 6,
+        "readings": [
+          {
+            "kind": "RANGE",
+            "port": 6,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=6 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 6,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=6 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 6,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=6 cm=-1.00 valid=0"
+          }
+        ]
+      },
+      {
+        "sensor_port": 7,
+        "readings": [
+          {
+            "kind": "RANGE",
+            "port": 7,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=7 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 7,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=7 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 7,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=7 cm=-1.00 valid=0"
+          }
+        ]
+      },
+      {
+        "sensor_port": 8,
+        "readings": [
+          {
+            "kind": "RANGE",
+            "port": 8,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=8 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 8,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=8 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 8,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=8 cm=-1.00 valid=0"
+          }
+        ]
+      },
+      {
+        "sensor_port": 9,
+        "readings": [
+          {
+            "kind": "RANGE",
+            "port": 9,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=9 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 9,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=9 cm=-1.00 valid=0"
+          },
+          {
+            "kind": "RANGE",
+            "port": 9,
+            "cm": -1.0,
+            "valid": false,
+            "raw": "RANGE port=9 cm=-1.00 valid=0"
+          }
+        ]
+      }
+    ],
+    "stop_acknowledged": true,
+    "ping": true,
+    "status_before": {
+      "kind": "STATUS",
+      "batt": 7.27,
+      "moving": false,
+      "enc": [
+        0.0,
+        0.0
+      ],
+      "raw": "STATUS batt=7.27 moving=0 enc=0,0"
+    },
+    "status_after": {
+      "kind": "STATUS",
+      "batt": 7.27,
+      "moving": false,
+      "enc": [
+        0.0,
+        0.0
+      ],
+      "raw": "STATUS batt=7.27 moving=0 enc=0,0"
+    },
+    "final_stop_acknowledged": true
+  },
+  "limitations": [
+    "No independent validation of camera debris recognition or travel accuracy.",
+    "All fifteen stopped diagnostic range samples were invalid; no software bypass was applied.",
+    "Latest live snapshot reported an API timeout after repeated no-echo holds."
+  ]
+}

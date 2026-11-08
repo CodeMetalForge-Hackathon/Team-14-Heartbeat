@@ -546,6 +546,8 @@ rover:
     continuous_forward: false
     # Retry no-echo readings while stopped and recover obstacle stops with fresh observations.
     autonomous_exploration: false
+    # Select whether audio/vision cues or only visual debris can start an inspection.
+    inspection_trigger: audio_and_vision
     # Optional distance per continuous forward segment; null reserves the remaining budget.
     cruise_chunk_cm: null
     # Optional minimum nominal rover battery reading before movement is offered.
@@ -564,6 +566,8 @@ rover:
     worker_join_s: 3.0
     # Number of recent action outcomes supplied as navigation context.
     history_size: 8
+    # Maximum recent stop snapshots kept in memory for the dashboard gallery.
+    stop_image_history_size: 8
     # API transport timeout; camera/API errors leave the rover stopped for review.
     read_timeout_s: 1.5
     # Image/webcam preview timeout; separate from the live movement freshness budget.

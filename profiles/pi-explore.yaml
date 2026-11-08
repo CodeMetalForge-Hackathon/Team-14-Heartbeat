@@ -9,6 +9,8 @@ rover:
     continuous_forward: true
     # Recheck no-echo readings and ordinary obstacles without ending exploration.
     autonomous_exploration: true
+    # Only the camera's INSPECT_DEBRIS choice starts the stationary listening procedure.
+    inspection_trigger: debris_only
     # Reserve at most 20 cm per cruise, preserving budget for later directions.
     cruise_chunk_cm: 20
     # Enable a voltage cutoff only after verifying this pack type and ADC calibration.
@@ -34,12 +36,14 @@ rover:
       absence of an edge from front ultrasonic distance alone.
       Choose INSPECT_DEBRIS as soon as recognizable debris or a rubble pile is
       visible, regardless of its ultrasonic distance. Do not approach to a
-      numerical standoff distance before inspecting it. Also stop and listen
-      for a visible person signaling for help using STOP_AND_LISTEN. The audio controller separately
-      investigates accepted knocks or vocal distress.
+      numerical standoff distance before inspecting it. Only visual debris
+      starts an investigation in this mission. Sounds are recorded but do not
+      request a stop while exploring. Listen for knock responses after stopping
+      at a debris site. A person or ordinary background sound alone does not
+      start the listening procedure; retain HOLD for a person obstructing travel.
       When range_valid is false, only stationary choices are available. Choose
-      HOLD to keep inspecting and retrying range, INSPECT_DEBRIS for visible
-      debris, or STOP_AND_LISTEN for a rescue cue. A missing echo never means open space. Choose HOLD
+      HOLD to keep inspecting and retrying range, or INSPECT_DEBRIS for visible
+      debris. A missing echo never means open space. Choose HOLD
       for an edge, unsupported ground, ambiguous travel evidence or unsafe turn.
       Respect the host's time and distance budgets. Reserved forward distance
       is not completed travel. No response never means nobody is there.
@@ -52,11 +56,11 @@ rover:
   audio_stop:
     # Applies only to hb patrol; hb listen/run never issue motor commands.
     enabled: true
-    # Accepted knocks or vocal distress cues request a stationary investigation.
+    # Classes remain available as evidence after the camera selects a debris site.
     trigger_mode: all
     # Continue through route checkpoints without scheduled audio investigations.
     scheduled_listen: false
-    # One accepted knock requests STOP; classification threshold remains unchanged.
+    # One accepted knock can qualify evidence at a debris site; it cannot stop exploration.
     knock_count: 1
 classifier:
   # Explicit selection; does not change the default Pi/YAMNet/heuristic path.

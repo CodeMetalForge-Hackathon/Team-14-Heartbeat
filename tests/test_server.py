@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import queue
 import threading
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import numpy as np
@@ -127,7 +128,7 @@ class FakeBlackBox:
         return {"events": 42, "clips": 3, "dropped": 0, "failed": False, "integrity_valid": True}
 
 
-def make_test_app(tmp_path, *, cfg=None):
+def make_test_app(tmp_path, *, cfg=None, patrol=None):
     pipeline, bus = FakePipeline(), EventBus()
     session = FakeSession(pipeline, bus)
     directory = tmp_path / "dashboard"
@@ -141,6 +142,7 @@ def make_test_app(tmp_path, *, cfg=None):
         pipeline, session, bus, cfg=cfg, run_id="test-run", profile=pipeline.profile,
         blackbox=FakeBlackBox(), dashboard_dir=directory,
         on_start=pipeline.start, on_stop=pipeline.close,
+        patrol=patrol,
     )
     return app, pipeline, session, bus
 
@@ -175,6 +177,27 @@ def test_server_serves_dashboard_and_local_assets(api):
     assert "Heartbeat test dashboard" in client.get("/").text
     assert client.get("/app.js").text == "window.heartbeat = true;"
     assert client.get("/missing.js").status_code == 404
+
+
+def test_stop_image_endpoint_serves_only_retained_jpegs(tmp_path):
+    images = {'retained': b'\xff\xd8camera-frame\xff\xd9'}
+    patrol = SimpleNamespace(snapshot=lambda: {'decisions': {'stop_images': []}},
+                             stop_image=images.get)
+    app, *_ = make_test_app(tmp_path, patrol=patrol)
+    with TestClient(app) as client:
+        response = client.get('/api/stop-images/retained')
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'image/jpeg'
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.content == images['retained']
+        assert client.get('/api/stop-images/unknown').status_code == 404
+        images.clear()
+        assert client.get('/api/stop-images/retained').status_code == 404
+
+
+def test_stop_image_endpoint_without_a_camera_patrol_is_unavailable(api):
+    client, *_ = api
+    assert client.get('/api/stop-images/unknown').status_code == 404
 
 
 def test_root_embeds_validated_ui_settings_before_state_request(api):
