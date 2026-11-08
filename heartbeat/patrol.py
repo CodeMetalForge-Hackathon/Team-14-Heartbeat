@@ -89,6 +89,11 @@ class Patrol:
             raise ValueError("rover.audio_stop.scheduled_listen must be boolean")
         if not self.scheduled_listen and not self.audio_enabled:
             raise ValueError("Disabling scheduled listening requires audio_stop.enabled")
+        # Opt-in: after an audio stop settles, challenge immediately instead of
+        # waiting for a second, fresh stationary cue during verification.
+        self.challenge_after_stop = self.audio_stop.get("challenge_after_stop", False)
+        if not isinstance(self.challenge_after_stop, bool):
+            raise ValueError("rover.audio_stop.challenge_after_stop must be boolean")
         if self.audio_enabled:
             for key in ("verify_s", "max_age_s", "knock_window_s", "stop_timeout_s"):
                 value = self.audio_stop.get(key)
@@ -527,7 +532,7 @@ class Patrol:
                 self._completed(generation, completion, True)
         elif (self.state == "SETTLING" and t >= max(self._deadline, self._prompt_gate_until)
               and not self._dialog_busy()):
-            if self.audio_enabled:
+            if self.audio_enabled and not self.challenge_after_stop:
                 self._begin_verify()
             else:
                 self._begin_listen()

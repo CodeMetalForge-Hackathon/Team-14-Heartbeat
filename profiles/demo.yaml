@@ -17,7 +17,9 @@ dialog:
   announce_count: true
   # One copied pattern confirms when it is unlikely enough by chance (below).
   min_matched_rounds: 1
-  # Chance-match ceiling: one quiet-room 3-knock match is about 1 in 2,400; 4 knocks about 1 in 68,000.
-  p_confirm: 0.001
-  # No 2-knock rounds: a single 2-knock match is only about 1 in 115 by chance.
-  patterns: [3, 4, 5]
+  # 1 in 100,000: at 1e-3, 3 of 4 no-survivor noise sims falsely confirmed over 10 minutes.
+  p_confirm: 0.00001
+  # Exact 5-knock answer in a quiet room is about 1 in 2.4 million, so one round confirms.
+  first_pattern: 5
+  # Later rounds ask 4 or 5; two matched rounds combine if the first answer was off by one.
+  patterns: [4, 5]

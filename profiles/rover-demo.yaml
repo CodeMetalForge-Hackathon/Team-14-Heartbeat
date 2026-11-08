@@ -1,0 +1,39 @@
+# Deterministic rover demo: drive the 1 m lane in profiles/route-1m.yaml, stop on a
+# knock, then challenge the survivor. No camera, OpenAI API or CLAP service needed.
+# Inherits omitted settings from rubble.yaml. Launch with scripts/demo_rover.sh.
+classifier:
+  # Rule-based scoring accepted 8 of 9 real stick answer knocks; CLAP accepted 2.
+  name: heuristic
+  # Accept a sound as a knock at or above this heuristic score (0-1).
+  threshold: 0.5
+dialog:
+  # Profile name included in dialog snapshots and the dashboard.
+  profile: rover-demo
+  # Longer answer window than rubble's 6.4 s for slower survivor reactions.
+  window_s: 8.5
+  # Latest first answer knock after the window opens, in seconds.
+  response_start_max_s: 4.5
+  # Say "Your turn. Knock N times." after each pattern so the survivor need not count.
+  announce_count: true
+  # One copied pattern confirms when it is unlikely enough by chance (below).
+  min_matched_rounds: 1
+  # 1 in 100,000 chance-match ceiling for confirmation.
+  p_confirm: 0.00001
+  # Exact 5-knock answer in a quiet room is about 1 in 2.4 million, so one round confirms.
+  first_pattern: 5
+  # Later rounds ask 4 or 5; two matched rounds combine if the first answer was off by one.
+  patterns: [4, 5]
+rover:
+  # Motor speed percent for the lane legs; 35% measured about 3.5 cm/s today.
+  speed_pct: 40
+  audio_stop:
+    # Stop the rover when the stick hears a knock while driving.
+    enabled: true
+    # Only classified knocks stop the rover; speech and other sounds do not.
+    trigger_mode: knocks
+    # Also stop, listen and challenge at the end of the lane.
+    scheduled_listen: true
+    # One accepted knock stops the rover; raise to 2 if track noise causes false stops.
+    knock_count: 1
+    # Challenge right after the stop settles instead of waiting for a second knock.
+    challenge_after_stop: true

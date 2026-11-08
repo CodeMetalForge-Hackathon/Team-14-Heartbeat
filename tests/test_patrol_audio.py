@@ -376,3 +376,32 @@ def test_checkpoint_stop_failure_cannot_advance_route(setup):
     pipeline.step(5.2)
     assert patrol.done and patrol.gap_name == "A"
     assert patrol.state in {"ABORTED", "ESTOP"}
+
+
+def test_challenge_after_stop_skips_second_cue_and_challenges_after_settling(setup):
+    pipeline, patrol, commands, _ = setup
+    patrol.challenge_after_stop = True
+    pipeline.step(3.1)
+    observation(pipeline, 3.1)
+    assert patrol.state == "STOPPING"
+    pipeline.step(3.2)
+    assert patrol.state == "SETTLING" and "challenge" not in commands
+    pipeline.step(5.2)
+    # No fresh stationary cue was needed: the dialog challenge starts immediately.
+    assert patrol.state == "LISTENING" and commands[-1] == "challenge"
+    assert not patrol.rover.moving
+
+
+def test_challenge_after_stop_must_be_boolean(setup):
+    pipeline, patrol, _, _ = setup
+    cfg = {**patrol.cfg, "audio_stop": {**patrol.audio_stop, "challenge_after_stop": "yes"}}
+    with pytest.raises(ValueError, match="challenge_after_stop"):
+        Patrol(patrol.rover, pipeline, patrol.engine, SimpleNamespace(), patrol.route, cfg)
+
+
+def test_rover_demo_profile_loads_with_one_knock_stop_and_direct_challenge():
+    profile = load_profile("rover-demo")
+    stop = profile.rover["audio_stop"]
+    assert stop["enabled"] and stop["trigger_mode"] == "knocks" and stop["challenge_after_stop"]
+    assert profile.classifier.name == "heuristic"
+    assert profile.dialog["announce_count"] and profile.dialog["min_matched_rounds"] == 1

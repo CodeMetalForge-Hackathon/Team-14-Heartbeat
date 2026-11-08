@@ -1,0 +1,6 @@
+# Deterministic demo lane: about 1 m straight ahead, no turns, no sensors needed.
+# Two 50 cm legs keep each move well inside the firmware's 30 s motion limit.
+- name: Search lane
+  moves:
+    - [drive, 50]  # First half of the lane, in centimeters.
+    - [drive, 50]  # Second half; the rover then stops, listens and challenges.
