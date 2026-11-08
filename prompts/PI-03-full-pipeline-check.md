@@ -5,3 +5,8 @@ Follow-up: user reported continuous HOLD/low_confidence and requested progress w
 Follow-up: user requested lowering the full-check motion confidence threshold
 from 0.70 to 0.50, running the full pipeline again, and committing and pushing
 all accumulated changes after completion.
+
+Follow-up: user requested smooth movement without the routine stops every 3 cm.
+Implement continuous guarded forward travel with camera/API and audio checks
+while moving. Retain the existing total travel limit and meaningful stop causes.
+User asked to avoid excessive testing; focus checks on the changed movement path.

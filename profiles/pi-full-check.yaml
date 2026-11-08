@@ -2,6 +2,15 @@
 # Compatible with the running clap-distress service on port 8767.
 rover:
   decisions:
+    # Keep forward motor output running while camera/API and audio checks continue.
+    continuous_forward: true
+    # Bound the single continuous forward target in milliseconds.
+    cruise_max_ms: 15000
+    action_descriptions:
+      FORWARD_SHORT: >-
+        Start or continue continuous forward travel within the remaining operator
+        distance budget. The host fixes speed and distance, continuously checks
+        audio and range, and requests new camera decisions during movement.
     # Accept offered motion proposals scoring at least 0.50 in this supervised test.
     min_confidence: 0.50
     # Progress objective for this bounded test; sensor and visual hazards still require HOLD.
@@ -9,6 +18,12 @@ rover:
       Perform the operator's supervised forward-travel test, progressing toward
       the forward_budget_cm limit reported in telemetry. Choose FORWARD_SHORT
       when offered and the camera shows a supported, unobstructed next step.
+      While telemetry reports moving, FORWARD_SHORT means continue the active
+      forward movement; it does not add another distance budget. Do not request
+      a stop just to obtain a new observation: observations continue in motion.
+      forward_commanded_cm reserves the entire active target in advance; it is
+      not completed travel. While continuous_target_in_progress is true, the
+      firmware is still working toward that reserved target and stops at its end.
       Continue useful progress when no actionable human distress cue is present.
       The live audio controller independently stops and investigates classified
       knocks or vocal distress. Choose STOP_AND_LISTEN for a specific visible

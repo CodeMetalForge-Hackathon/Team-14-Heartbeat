@@ -168,6 +168,27 @@ These are requested bounds, not measured travel accuracy.
 Freshness, confidence, state and sensor checks run again before motion dispatch.
 The model's score is not a calibrated probability that movement is safe.
 
+### Continuous forward mode
+
+`pi-full-check` opts into `rover.decisions.continuous_forward`. One accepted
+FORWARD_SHORT proposal starts a bounded CRUISE target, reserving the remaining
+forward budget. Subsequent forward decisions renew permission without stopping
+or sending another movement command. Camera requests run while moving; the MCU
+streams `NAV FORWARD` range observations, avoiding a blocking RANGE transaction
+behind the active motor command. HOLD, weak proposals, stale evidence and faults
+stop motion, as do the existing audio and operator controls. Turns are disabled
+in this mode. The total reserved distance is not measured completed distance;
+an interrupted target is not refunded.
+
+Protocol addition: `CRUISE <cm> <speed_pct> <max_ms>`, acknowledged at completion
+with all three arguments. Limits are forward 100 cm, 60% power, 30000 ms; profile
+limits may be lower. Updated firmware advertises `cruise=1` after `guarded=1` in
+CAPS. STEP/PIVOT retain their existing 2000 ms ceiling. Install matching host and
+firmware versions together. The test profile uses a 50 cm target and 15000 ms
+deadline. Continuous-mode serial heartbeats independently consult the host
+motion gate so expired camera evidence cannot leave the motors running while
+the processing loop is stalled.
+
 Firmware requires fresh front range and checks it during both guarded movement
 types. Unknown/too-close range fails stopped with no automatic turn or restart.
 Both encoder targets must complete; missing feedback cannot become timed-pulse

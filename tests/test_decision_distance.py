@@ -2,6 +2,7 @@
 from dataclasses import replace
 from types import SimpleNamespace
 import time
+import threading
 
 import pytest
 
@@ -19,9 +20,30 @@ class BenchRover(FakeRover):
         super().__init__(*args, **kwargs)
         self.front, self.fail_step = front, fail_step
         self.steps = []
+        self.cruises = []
+        self.cruise_finished = threading.Event()
+        self.cruise_canceled = False
 
     def capabilities(self):
-        return {"guarded": True}
+        return {"guarded": True, "cruise": True}
+
+    def cruise(self, cm, speed, deadline):
+        self.cruise_finished.clear()
+        self.cruise_canceled = False
+        self.moving = True
+        self.cruises.append(cm)
+        self.cruise_finished.wait(2)
+        self.moving = False
+        return not self.cruise_canceled
+
+    def cruise_observation(self):
+        from heartbeat.decision_patrol import monotonic
+        return {'at': monotonic(), 'cm': self.front, 'valid': self.front >= 2, 'moving': self.moving}
+
+    def stop(self):
+        self.cruise_canceled = True
+        self.cruise_finished.set()
+        return super().stop()
 
     def range(self, port):
         return {"valid": True, "cm": self.front}
@@ -49,11 +71,11 @@ def bench(monkeypatch):
     monkeypatch.setattr(module, 'monotonic', lambda: clock[0])
     controllers = []
 
-    def make(*, front=120, fail_step=False, budget=50, choice=None, confidence=1.0):
+    def make(*, front=120, fail_step=False, budget=50, choice=None, confidence=1.0, continuous=False):
         profile = load_profile('pi-full-check')
         cfg = profile.rover
         cfg['settle_s'] = .01
-        cfg['decisions'].update(forward_budget_cm=budget, session_s=60,
+        cfg['decisions'].update(forward_budget_cm=budget, session_s=60, continuous_forward=continuous,
                                 min_confidence=.7,
                                 decision_interval_s=.01, action_settle_s=0, hold_s=.01)
         profile = replace(profile, dialog={**profile.dialog, 'auto_challenge': False})
@@ -73,6 +95,8 @@ def bench(monkeypatch):
 
         def choose(frame, telemetry, allowed):
             action = choice or ('FORWARD_SHORT' if 'FORWARD_SHORT' in allowed else 'HOLD')
+            if callable(action):
+                action = action(telemetry)
             return SimpleNamespace(action=action, probabilities={
                 a: confidence if a == action else (1 - confidence) / (len(allowed) - 1)
                 for a in allowed}, latency_s=0)
@@ -115,6 +139,64 @@ def test_distance_target_does_not_override_obstacle(bench):
         tick()
     assert not rover.steps
     assert controller.snapshot()['decisions']['forward_commanded_cm'] == 0
+
+
+def test_continuous_forward_reobserves_without_restarting_motors(bench):
+    controller, rover, tick = bench(continuous=True)
+    for _ in range(100):
+        tick()
+    assert controller.state == 'MOVING'
+    assert rover.cruises == [50]
+    assert not rover.steps
+    assert any(item['outcome'] == 'continued' for item in controller._history)
+    rover.cruise_finished.set()
+    for _ in range(100):
+        tick()
+        if controller.done:
+            break
+    assert controller.done
+    assert controller.snapshot()['decisions']['forward_commanded_cm'] == 50
+
+
+@pytest.mark.parametrize('action', ['HOLD', 'STOP_AND_LISTEN'])
+def test_continuous_decision_can_interrupt_active_motion(bench, action):
+    controller, rover, tick = bench(continuous=True,
+        choice=lambda telemetry: action if telemetry['moving'] else 'FORWARD_SHORT')
+    for _ in range(100):
+        tick()
+        if rover.cruises and controller.state not in {'MOVING', 'STOPPING'}:
+            break
+    assert rover.cruises == [50]
+    assert rover.cruise_canceled and not rover.moving
+
+
+def test_continuous_stale_camera_stops_active_motion(bench):
+    controller, rover, tick = bench(continuous=True)
+    for _ in range(100):
+        tick()
+        if rover.cruises:
+            break
+    controller._next_observation_at = float('inf')
+    for _ in range(300):
+        tick()
+        if rover.cruise_canceled:
+            break
+    assert controller.state in {'STOPPING', 'REVIEW', 'DONE'}
+    assert rover.cruise_canceled and not rover.moving
+
+
+def test_continuous_audio_interrupts_motion(bench):
+    controller, rover, tick = bench(continuous=True)
+    for _ in range(100):
+        tick()
+        if rover.cruises:
+            break
+    controller._request_audio_stop({'kind': 'KNOCK_BURST', 'detected_t': controller.pipeline.t})
+    for _ in range(30):
+        tick()
+    assert rover.cruise_canceled and not rover.moving
+    assert controller.state in {'SETTLING', 'VERIFYING'}
+    assert controller.snapshot()['decisions']['forward_commanded_cm'] == 50
 
 
 def test_failed_step_keeps_its_reserved_distance_and_stops(bench):

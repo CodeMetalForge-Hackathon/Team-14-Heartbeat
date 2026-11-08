@@ -107,6 +107,27 @@ void completeSegment(){
 int main(){
  for(int p=0;p<17;p++)mePort[p].s2=100+p;
  setup();
+ // Continuous guarded travel crosses 3 cm without stopping; only final target stops.
+ reset();configure();command("CRUISE 50 35 15000");assert(moving && continuousMove);
+ tick(20);int cruiseZeroLeft=leftMotor.zeroWrites,cruiseZeroRight=rightMotor.zeroWrites;
+ for(int i=0;i<40;i++){
+   leftMotor.position+=10*leftDirection;rightMotor.position+=10*rightDirection;
+   tick(80);assert(moving && leftMotor.pwm!=0 && rightMotor.pwm!=0);
+ }
+ assert(leftMotor.zeroWrites==cruiseZeroLeft && rightMotor.zeroWrites==cruiseZeroRight);
+ assert(Serial.out.str().find("NAV FORWARD")!=std::string::npos);
+ leftMotor.position=startLeft+targetPulses*leftDirection;
+ rightMotor.position=startRight+targetPulses*rightDirection;
+ tick(20);off();assert(Serial.out.str().find("OK CRUISE 50 35 15000")!=std::string::npos);
+ reset();configure();command("CRUISE 50 35 15000");testEcho=25*58;tick(80);off();
+ assert(Serial.out.str().find("ERR obstacle_too_close")!=std::string::npos);
+ reset();configure();command("CRUISE 50 35 15000");testEcho=0;tick(80);off();
+ assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ reset();configure();command("CRUISE 50 35 15000");testMillis+=1500;loop();off();
+ assert(Serial.out.str().find("ERR watchdog")!=std::string::npos);
+ reset();configure();command("CRUISE 50 35 100");tick(100);off();
+ assert(Serial.out.str().find("ERR guard_timeout")!=std::string::npos);
+ reset();configure();command("STEP 50 35 15000");off(); // Old short-action ceiling preserved.
  // Mechanical forward points toward the front sensor, with matching encoder signs.
  reset();command("DRIVE 10 30");tick(20);
  assert(leftDirection==-1 && rightDirection==1 && leftMotor.pwm<0 && rightMotor.pwm>0);

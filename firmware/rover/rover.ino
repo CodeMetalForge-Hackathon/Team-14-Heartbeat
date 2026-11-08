@@ -66,6 +66,7 @@ bool discardLine = false;
 bool moving = false;
 bool turning = false;
 bool guardedMove = false;
+bool continuousMove = false;
 unsigned long guardedStartMs = 0, guardedDurationMs = 0, guardedLastRangeMs = 0;
 char guardedArgs[MAX_LINE + 1];
 char moveValue[MAX_LINE + 1];
@@ -118,6 +119,7 @@ void stopMotors() {
   moving = false;
   exploring = false;
   guardedMove = false;  // STOP/faults cancel the entire one-shot transaction.
+  continuousMove = false;
   leftPwm = rightPwm = 0.0f;
 }
 
@@ -319,6 +321,9 @@ void updateGuardedRange() {
   if (turning ? cm < navigationTurnClearanceCm : cm <= navigationStopCm) {
     fail(F("obstacle_too_close")); return;
   }
+  if (continuousMove) {
+    Serial.print(F("NAV FORWARD ")); Serial.println(cm, 2);
+  }
 }
 
 void navigationEvent(const __FlashStringHelper *state, float cm) {
@@ -415,7 +420,7 @@ void handleLine(char *line) {
     Serial.println(F("PONG rover v1"));
   } else if (strcmp(command, "CAPS") == 0 && count == 1) {
     lastCommandMs = millis();
-    Serial.println(F("CAPS guarded=1"));
+    Serial.println(F("CAPS guarded=1 cruise=1"));
   } else if (strcmp(command, "STATUS") == 0 && count == 1) {
     lastCommandMs = millis();
     sendStatus();
@@ -464,18 +469,22 @@ void handleLine(char *line) {
     navigationSpeed = speed; navigationDurationMs = static_cast<unsigned long>(seconds * 1000);
     navigationStartMs = navigationWaitMs = lastCommandMs = millis();
     navigationTurns = 0; navigationPhase = NAV_WAIT; exploring = true;
-  } else if ((strcmp(command, "STEP") == 0 || strcmp(command, "PIVOT") == 0) && count == 4) {
+  } else if ((strcmp(command, "STEP") == 0 || strcmp(command, "PIVOT") == 0 ||
+              strcmp(command, "CRUISE") == 0) && count == 4) {
     float amount, speed, maxMs;
     if (!parseNumber(tokens[1], amount) || !parseNumber(tokens[2], speed) ||
         !parseNumber(tokens[3], maxMs)) { fail(F("number")); return; }
     const bool isTurn = strcmp(command, "PIVOT") == 0;
+    const bool isContinuous = strcmp(command, "CRUISE") == 0;
     if (amount == 0 || (!isTurn && amount < 0) ||
         fabsf(amount) > (isTurn ? MAX_TURN_DEG : MAX_DRIVE_CM) ||
-        speed < 1 || speed > MAX_SPEED_PCT || maxMs < 1 || maxMs > MAX_GUARDED_MS ||
+        speed < 1 || speed > MAX_SPEED_PCT || maxMs < 1 ||
+        maxMs > (isContinuous ? MAX_MOVE_MS : MAX_GUARDED_MS) ||
         maxMs != floorf(maxMs)) { fail(F("limit")); return; }
     lastCommandMs = millis();
     startGuardedMove(isTurn, amount, speed, static_cast<unsigned long>(maxMs),
                      tokens[1], tokens[2], tokens[3]);
+    continuousMove = moving && isContinuous;
   } else if ((strcmp(command, "DRIVE") == 0 || strcmp(command, "TURN") == 0) && count == 3) {
     float amount, speed;
     if (!parseNumber(tokens[1], amount) || !parseNumber(tokens[2], speed)) {
@@ -591,9 +600,10 @@ void updateMotion() {
       return;  // Internal segments never acknowledge the outer EXPLORE command.
     }
     const bool completedGuarded = guardedMove;
+    const bool completedContinuous = continuousMove;
     stopMotors();
     if (completedGuarded) {
-      Serial.print(turning ? F("OK PIVOT ") : F("OK STEP "));
+      Serial.print(completedContinuous ? F("OK CRUISE ") : turning ? F("OK PIVOT ") : F("OK STEP "));
       Serial.println(guardedArgs);
     } else {
       Serial.print(turning ? F("OK TURN ") : F("OK DRIVE "));

@@ -44,6 +44,9 @@ def validate_decision_settings(settings):
     if not isinstance(settings, Mapping):
         raise ValueError("rover.decisions must be a mapping")
     cfg = deepcopy(dict(settings))
+    cfg.setdefault("continuous_forward", False)
+    if not isinstance(cfg["continuous_forward"], bool):
+        raise ValueError("rover.decisions.continuous_forward must be boolean")
     positive = ("session_s", "observation_max_age_s", "decision_interval_s", "hold_s",
                 "forward_cm", "turn_deg", "speed_pct", "worker_join_s")
     try:
@@ -51,6 +54,12 @@ def validate_decision_settings(settings):
             _number(cfg[key], key)
         if cfg.get("forward_budget_cm") is not None:
             _number(cfg["forward_budget_cm"], "forward_budget_cm")
+        if cfg["continuous_forward"]:
+            if cfg.get("forward_budget_cm") is None or cfg["forward_budget_cm"] > 100:
+                raise ValueError("Continuous mode requires a forward_budget_cm at most 100")
+            duration = cfg.get("cruise_max_ms")
+            if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 30000:
+                raise ValueError("cruise_max_ms must be an integer from 1 through 30000")
         if cfg["session_s"] > 600:
             raise ValueError("rover.decisions.session_s must be at most 600 seconds")
         _number(cfg["action_settle_s"], "action_settle_s", positive=False)
@@ -89,10 +98,10 @@ class _ObservationError(Exception):
 
 
 class DecisionsPatrol(Patrol):
-    """Stationary observations followed by optional, short guarded movements.
+    """Guarded steps, or bounded continuous forward travel with live observations.
 
     ``arm_motion=False`` still reads real camera/range/audio inputs and records
-    proposals. It never dispatches STEP or PIVOT. The camera and client must
+    proposals. It never dispatches STEP, PIVOT or CRUISE. The camera and client must
     implement bounded operations; a controller watchdog faults an overrun and
     discards its eventual result, and shutdown only joins workers for a bound.
     """
@@ -101,6 +110,8 @@ class DecisionsPatrol(Patrol):
                  arm_motion=False, allow_turns=False):
         cfg = deepcopy(dict(getattr(cfg, "rover", cfg)))
         decisions = validate_decision_settings(cfg.get("decisions"))
+        if decisions["continuous_forward"] and allow_turns:
+            raise ValueError("Continuous forward mode does not support turns")
         navigation_args(cfg.get("navigation"))
         if not isinstance(arm_motion, bool) or not isinstance(allow_turns, bool):
             raise ValueError("Decisions motion and turn opt-ins must be boolean")
@@ -137,6 +148,7 @@ class DecisionsPatrol(Patrol):
         self._stop_context = None
         self._stop_until = None
         self._verification_for_resume = False
+        self._cruise_active = False
         super().__init__(rover, pipeline, engine, prompter,
                          [{"name": "Decision search 1", "moves": []}], cfg)
         self._observation_thread = threading.Thread(
@@ -203,6 +215,7 @@ class DecisionsPatrol(Patrol):
             self._halted = True
             self._generation += 1
             self._cancel_observation()
+            self._cruise_active = False
             return self._generation
 
     def _start(self):
@@ -241,7 +254,8 @@ class DecisionsPatrol(Patrol):
             self._observation_active.set()
             self._observation_jobs.put_nowait(pending)
         self._decision_reason = "preparing" if kind == "prepare" else "capturing"
-        self._emit_state("OBSERVING")
+        if not self._cruise_active:
+            self._emit_state("OBSERVING")
         self._decision_event("requested")
 
     def _current_observation(self, pending):
@@ -251,7 +265,7 @@ class DecisionsPatrol(Patrol):
 
     def _allowed_actions(self, front_cm):
         choices = list(STATIONARY_ACTIONS)
-        if front_cm >= self.cfg["navigation"]["clear_cm"] and self._forward_remaining() > 0:
+        if front_cm >= self.cfg["navigation"]["clear_cm"] and (self._forward_remaining() > 0 or self._cruise_active):
             choices.append("FORWARD_SHORT")
         if self.allow_turns and front_cm >= self.cfg["navigation"]["turn_clearance_cm"]:
             choices.extend(("TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"))
@@ -262,7 +276,7 @@ class DecisionsPatrol(Patrol):
         return math.inf if budget is None else max(0.0, budget - self._forward_commanded_cm)
 
     def _submit(self, method, args, completion=None):
-        if method == "step":
+        if method in {"step", "cruise"}:
             distance = min(args[0], self._forward_remaining())
             if distance <= 0:
                 self._request_navigation_stop("budget", "forward_budget_exhausted")
@@ -283,6 +297,8 @@ class DecisionsPatrol(Patrol):
             raise _ObservationError("Guarded rover capabilities are unavailable")
         if self.armed and capabilities["guarded"] is not True:
             raise _ObservationError("Firmware does not support guarded STEP/PIVOT")
+        if self.decision_cfg["continuous_forward"] and capabilities.get("cruise") is not True:
+            raise _ObservationError("Continuous mode requires updated CRUISE firmware")
         if pending["cancel"].is_set():
             return None
         if self.rover.configure_navigation(self.cfg["navigation"]) is not True:
@@ -316,17 +332,27 @@ class DecisionsPatrol(Patrol):
         # Capture first so a healthy camera cold start cannot age the range
         # before its first frame. Both input timestamps remain motion gates.
         range_at = monotonic()
-        reading = self.rover.range(self.cfg["navigation"]["sensor_port"])
+        if self._cruise_active:
+            reading = self.rover.cruise_observation()
+            if (not isinstance(reading, Mapping) or not _finite_number(reading.get("at"))
+                    or not 0 <= range_at - reading["at"] <= self.decision_cfg["observation_max_age_s"]):
+                raise _ObservationError("Continuous range telemetry expired or is unavailable")
+            range_at = reading["at"]
+            status = {"moving": reading.get("moving")}
+        else:
+            reading = self.rover.range(self.cfg["navigation"]["sensor_port"])
+            status = self.rover.status()
         if (not isinstance(reading, Mapping) or reading.get("valid") is not True
                 or not _finite_number(reading.get("cm")) or not 2 <= reading["cm"] <= 400):
             raise _ObservationError("Front range is invalid or unavailable")
         if pending["cancel"].is_set():
             return None
-        status = self.rover.status()
-        if not isinstance(status, Mapping) or status.get("moving") is not False:
+        if not isinstance(status, Mapping) or status.get("moving") is not self._cruise_active:
             raise _ObservationError("Stopped rover status could not be verified")
         front = float(reading["cm"])
-        telemetry = {"front_cm": front, "moving": False, "armed": self.armed,
+        telemetry = {"front_cm": front, "moving": self._cruise_active, "armed": self.armed,
+                     "continuous_forward": self.decision_cfg["continuous_forward"],
+                     "continuous_target_in_progress": self._cruise_active,
                      "allow_turns": self.allow_turns, "steps": self._steps,
                      "forward_commanded_cm": self._forward_commanded_cm,
                      "forward_budget_cm": self.decision_cfg.get("forward_budget_cm"),
@@ -387,7 +413,8 @@ class DecisionsPatrol(Patrol):
         self._last_front_cm = telemetry["front_cm"]
         self.battery = telemetry.get("battery")
         self._decision_reason = "awaiting_decision"
-        self._emit_state("DECIDING")
+        if not self._cruise_active:
+            self._emit_state("DECIDING")
 
     def _validated_result(self, result, allowed):
         action = getattr(result, "action", None)
@@ -454,6 +481,12 @@ class DecisionsPatrol(Patrol):
             self._motion_intent = {"action": action, "observed": value["observed"],
                                    "front_cm": value["telemetry"]["front_cm"],
                                    "generation": self._generation}
+            if self._cruise_active:
+                self._record_outcome("continued")
+                self._decision_reason = "continuous_motion"
+                self._next_observation_at = monotonic() + self.decision_cfg["decision_interval_s"]
+                self._decision_event("continued")
+                return
             self._decision_reason = "guarded_motion"
             self._record_outcome("dispatched")
             self._emit_state("MOVING")
@@ -462,7 +495,13 @@ class DecisionsPatrol(Patrol):
                 return
             speed, max_ms = self.decision_cfg["speed_pct"], self.decision_cfg["max_action_ms"]
             if action == "FORWARD_SHORT":
-                self._submit("step", (self.decision_cfg["forward_cm"], speed, max_ms), "decision_moved")
+                if self.decision_cfg["continuous_forward"]:
+                    self._cruise_active = True
+                    self._next_observation_at = monotonic() + self.decision_cfg["decision_interval_s"]
+                    self._submit("cruise", (self._forward_remaining(), speed,
+                                 self.decision_cfg["cruise_max_ms"]), "decision_moved")
+                else:
+                    self._submit("step", (self.decision_cfg["forward_cm"], speed, max_ms), "decision_moved")
             else:
                 right = action == "TURN_RIGHT_SHORT"
                 sign = 1 if right == self.decision_cfg["positive_turn_is_right"] else -1
@@ -470,6 +509,10 @@ class DecisionsPatrol(Patrol):
 
     def _hold(self, reason, request_started):
         if self._halted or self.done:
+            return
+        if self._cruise_active:
+            self._record_outcome(reason)
+            self._request_navigation_stop("hold", reason)
             return
         self._motion_intent = None
         self._record_outcome(reason)
@@ -489,7 +532,7 @@ class DecisionsPatrol(Patrol):
             generation, method, args, completion = job
             if generation != self._generation or self._closed:
                 continue
-            if method in {"drive", "turn", "explore", "step", "pivot"} and not self.motion_allowed:
+            if method in {"drive", "turn", "explore", "step", "pivot", "cruise"} and not self.motion_allowed:
                 ok = False
             else:
                 try:
@@ -502,6 +545,9 @@ class DecisionsPatrol(Patrol):
         if generation != self._generation or self.done or self._halted:
             return
         if completion == "decision_moved":
+            if self._cruise_active:
+                self._cruise_active = False
+                self._cancel_observation()
             self._motion_intent = None
             if ok is not True:
                 self._record_outcome("failed")
@@ -561,6 +607,7 @@ class DecisionsPatrol(Patrol):
             self._generation += 1
             generation = self._generation
         self._cancel_observation()
+        self._cruise_active = False
         if was_moving and self._history and self._history[-1]["outcome"] == "dispatched":
             self._record_outcome("interrupted")
         self._interrupted_move = self._interrupted_move or was_moving
@@ -592,6 +639,9 @@ class DecisionsPatrol(Patrol):
             return
         if context == "review":
             self._emit_state("REVIEW")
+        elif context == "hold":
+            self._next_observation_at = monotonic() + self.decision_cfg["hold_s"]
+            self._emit_state("HOLDING")
         elif context == "budget":
             self._finish("DONE")
         else:
@@ -633,6 +683,11 @@ class DecisionsPatrol(Patrol):
             if self._dialog_busy():
                 self._verification_for_resume = True
                 self._request_navigation_stop("resume", "dialog_interrupted_navigation")
+            elif self._cruise_active:
+                if not self.motion_allowed:
+                    self._review_failure("Continuous movement observation expired")
+                elif monotonic() >= self._next_observation_at:
+                    self._launch_observation()
             elif self.state == "OBSERVING" and self._pending_observation is None:
                 self._launch_observation("observe" if self._navigation_ready else "prepare")
             elif self.state == "HOLDING" and monotonic() >= self._next_observation_at:

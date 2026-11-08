@@ -542,6 +542,10 @@ rover:
     forward_cm: 3.0
     # Optional total forward-command budget in cm; interrupted steps are not refunded.
     forward_budget_cm: null
+    # Opt in to one uninterrupted forward target with observations during motion.
+    continuous_forward: false
+    # Firmware deadline for a continuous target; protocol ceiling is 30000 ms.
+    cruise_max_ms: 15000
     # Fixed absolute angle assigned to either turn choice, in degrees.
     turn_deg: 10.0
     # Fixed motor speed for guarded Decisions actions; cannot be set by the model.

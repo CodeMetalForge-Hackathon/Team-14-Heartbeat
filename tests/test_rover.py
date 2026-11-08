@@ -106,6 +106,46 @@ def test_parse_all_replies(line, kind):
     assert rover.parse_reply(line)["kind"] == kind
 
 
+def test_continuous_command_streams_range_and_stops_when_gate_expires(make_link):
+    class CruiseSerial(Serial):
+        def write(self, payload):
+            line = payload.decode().strip()
+            if line == 'CAPS' or line.startswith('CRUISE '):
+                with self.condition:
+                    self.writes.append(line)
+                    self.condition.notify_all()
+                self.push('CAPS guarded=1 cruise=1' if line == 'CAPS' else 'NAV FORWARD 90.00')
+                return len(payload)
+            return super().write(payload)
+    blocked = threading.Event()
+    link, serial = make_link(CruiseSerial(), engine_is_listening=blocked.is_set)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(link.cruise(50, 35, 15000)))
+    worker.start()
+    assert serial.wait_command('CRUISE 50 35 15000')
+    deadline = time.monotonic() + 1
+    while link.cruise_observation() is None and time.monotonic() < deadline:
+        time.sleep(.001)
+    assert link.cruise_observation()['cm'] == 90
+    blocked.set()
+    assert serial.wait_command('STOP')
+    worker.join(1)
+    assert result == [False]
+    assert not link.moving
+
+
+def test_old_firmware_cannot_receive_continuous_command(make_link):
+    class OldSerial(Serial):
+        def write(self, payload):
+            if payload == b'CAPS\n':
+                self.push('CAPS guarded=1')
+                return len(payload)
+            return super().write(payload)
+    link, serial = make_link(OldSerial())
+    assert link.cruise(50, 35, 15000) is False
+    assert not any(line.startswith('CRUISE') for line in serial.writes)
+
+
 @pytest.mark.parametrize("line", ["", "   ", "PONG knocker v1", "READY stickmic v1", "OK", "OK DRIVE nan",
     "OK TURN inf", "OK STOP 1", "OK LED 256 0 0", "OK LED 1.5 0 0", "OK CAL 18",
     "STATUS batt=nan moving=0 enc=1,2", "STATUS batt=12 moving=2 enc=1,2",

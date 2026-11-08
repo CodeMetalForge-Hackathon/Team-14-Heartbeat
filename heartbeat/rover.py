@@ -20,7 +20,8 @@ from .stickmic import canonical_port, claim_port, new_serial_connection, release
 
 MAX_REPLY_BYTES = 256  # Fixed framing bound, not a motion tuning parameter.
 MAX_GUARDED_MS = 2000  # Controller protocol ceiling, not a route tuning value.
-GUARDED_COMMANDS = {"STEP", "PIVOT"}
+MAX_CRUISE_MS = 30000  # Separate continuous-command protocol ceiling.
+GUARDED_COMMANDS = {"STEP", "PIVOT", "CRUISE"}
 MOTION_COMMANDS = {"DRIVE", "TURN", "EXPLORE", *GUARDED_COMMANDS}
 DATA_COMMANDS = {"STATUS", "RANGE", "CAPS"}
 
@@ -75,13 +76,15 @@ def parse_reply(line: str | bytes) -> dict:
     if kind == "ERR" and len(words) > 1:
         return {"kind": "ERR", "reason": " ".join(words[1:]), "raw": raw}
     if kind == "CAPS":
-        if len(words) != 2 or words[1] not in {"guarded=0", "guarded=1"}:
+        if (len(words) not in {2, 3} or words[1] not in {"guarded=0", "guarded=1"}
+                or len(words) == 3 and words[2] != "cruise=1"):
             raise ValueError("Invalid rover capabilities")
-        return {"kind": "CAPS", "guarded": words[1] == "guarded=1", "raw": raw}
+        return {"kind": "CAPS", "guarded": words[1] == "guarded=1", "raw": raw,
+                **({"cruise": True} if len(words) == 3 else {})}
     if kind == "OK" and len(words) >= 2:
         command = words[1]
         counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1,
-                  "STEP": 3, "PIVOT": 3, "NAVCFG": 11, "LED": 3, "CAL": 2}
+                  "STEP": 3, "PIVOT": 3, "CRUISE": 3, "NAVCFG": 11, "LED": 3, "CAL": 2}
         if command not in counts or len(words) != counts[command] + 2:
             raise ValueError(f"Malformed rover acknowledgement: {raw}")
         try:
@@ -92,9 +95,10 @@ def parse_reply(line: str | bytes) -> dict:
             raise ValueError("Nonfinite rover acknowledgement")
         if command in GUARDED_COMMANDS:
             amount, speed, max_ms = args
-            if (not (0 < amount <= 100 if command == "STEP" else 0 < abs(amount) <= 180)
+            ceiling = MAX_CRUISE_MS if command == "CRUISE" else MAX_GUARDED_MS
+            if (not (0 < amount <= 100 if command in {"STEP", "CRUISE"} else 0 < abs(amount) <= 180)
                     or not 1 <= speed <= 60 or not max_ms.is_integer()
-                    or not 1 <= max_ms <= MAX_GUARDED_MS):
+                    or not 1 <= max_ms <= ceiling):
                 raise ValueError("Malformed guarded movement acknowledgement")
         if command == "NAVCFG":
             navigation_args(dict(zip(NAVIGATION_KEYS, args)))
@@ -196,6 +200,8 @@ class _Commands:
         self.moving = False
         self.estopped = False
         self._stop_epoch = 0
+        self._cruise_range = None
+        self._continuous_command = False
 
     def set_motion_gate(self, callback: Callable[[], bool]) -> None:
         self.engine_is_listening = callback
@@ -211,20 +217,21 @@ class _Commands:
 
     def _validate(self, command: str, args: tuple) -> tuple:
         count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0, "CAPS": 0,
-                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "STEP": 3, "PIVOT": 3,
+                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "STEP": 3, "PIVOT": 3, "CRUISE": 3,
                  "NAVCFG": 11, "RANGE": 1, "LED": 3, "CAL": 2}
         if command not in count or len(args) != count[command]:
             raise ValueError("Invalid rover command")
         numbers = tuple(_finite(value, command) for value in args)
         if command in MOTION_COMMANDS:
-            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command in {"DRIVE", "STEP"} else self.cfg.max_turn_deg)
+            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command in {"DRIVE", "STEP", "CRUISE"} else self.cfg.max_turn_deg)
             if not (1 if command == "EXPLORE" else -bound) <= numbers[0] <= bound:
                 raise ValueError(f"{command} exceeds host distance/angle limit")
             if command in GUARDED_COMMANDS:
-                if numbers[0] == 0 or command == "STEP" and numbers[0] < 0:
+                if numbers[0] == 0 or command in {"STEP", "CRUISE"} and numbers[0] < 0:
                     raise ValueError("Guarded STEP requires forward travel; PIVOT requires a nonzero angle")
-                if not numbers[2].is_integer() or not 1 <= numbers[2] <= MAX_GUARDED_MS:
-                    raise ValueError("Guarded movement deadline must be an integer from 1 through 2000 ms")
+                ceiling = MAX_CRUISE_MS if command == "CRUISE" else MAX_GUARDED_MS
+                if not numbers[2].is_integer() or not 1 <= numbers[2] <= ceiling:
+                    raise ValueError(f"Guarded movement deadline must be an integer from 1 through {ceiling} ms")
             if not 1 <= numbers[1] <= self.cfg.max_speed_pct:
                 raise ValueError("Rover speed must be between 1 and the profile limit")
             if self.estopped:
@@ -254,6 +261,15 @@ class _Commands:
     def pivot(self, deg, speed_pct, max_ms):
         """Signed encoder turn with local front-range checks and a deadline."""
         return self._command("PIVOT", (deg, speed_pct, max_ms))
+
+    def cruise(self, cm, speed_pct, max_ms):
+        """One continuous forward target, with firmware range and time guards."""
+        return self._command("CRUISE", (cm, speed_pct, max_ms))
+
+    def cruise_observation(self):
+        """Read streamed range without blocking behind the active motor command."""
+        reading = self._cruise_range
+        return None if reading is None else {**reading, "moving": self.moving}
 
     def capabilities(self):
         return self._command("CAPS", ())
@@ -362,6 +378,8 @@ class RoverLink(_Commands):
                         self._capabilities_connection is not connection
                         or not (self._capabilities or {}).get("guarded")):
                     raise ValueError("Rover firmware has not advertised guarded movement")
+                if command == "CRUISE" and not (self._capabilities or {}).get("cruise"):
+                    raise ValueError("Rover firmware has not advertised continuous movement")
                 if command == "HB" and not self.moving:
                     return
                 if connection is not self._connection:
@@ -395,6 +413,8 @@ class RoverLink(_Commands):
                             return
                         if reply["kind"] == "READY":
                             self._boot_ready.set()
+                        if reply["kind"] == "NAV" and reply["state"] == "FORWARD" and self.moving:
+                            self._cruise_range = {"valid": True, "cm": reply["cm"], "at": time.monotonic()}
                         if reply["kind"] == "ERR":
                             self._fail_pending(reply["reason"])
                         else:
@@ -521,6 +541,9 @@ class RoverLink(_Commands):
             if not self.moving or connection is not self._connection:
                 return
             try:
+                if self._continuous_command and self.engine_is_listening():
+                    self.stop()
+                    return
                 self._write(connection, "HB")
             except Exception as exc:
                 self._error(exc, command="HB")
@@ -553,8 +576,12 @@ class RoverLink(_Commands):
                             self._capabilities_connection = connection
                     if not (self._capabilities or {}).get("guarded"):
                         raise ValueError("Rover firmware does not support guarded movement")
+                    if command == "CRUISE" and not (self._capabilities or {}).get("cruise"):
+                        raise ValueError("Rover firmware does not support CRUISE; upload the updated sketch")
                 motion = command in MOTION_COMMANDS
                 if motion:
+                    self._continuous_command = command == "CRUISE"
+                    self._cruise_range = None
                     self.moving = True
                     self._heartbeat_cancel = threading.Event()
                     threading.Thread(target=self._heartbeat, args=(self._connection, self._heartbeat_cancel), daemon=True,

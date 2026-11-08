@@ -3,9 +3,12 @@
 The operator requested tabletop testing with movement, camera/API decisions,
 knocks and other audio signals. `pi-full-check` enables knock and vocal monitoring,
 retains 35% drive power and the existing sensor/freshness/STOP guards, and caps
-the sum of forward command distances at 50 cm. Steps remain at most 3 cm;
-the final step is shortened to the remaining budget. Interrupted or failed
-steps consume their entire requested distance because partial travel is unknown.
+the sum of forward command distances at 50 cm. The profile now uses continuous
+forward travel: the first accepted forward proposal dispatches one guarded
+`CRUISE 50 35 15000` target. Camera/API decisions continue during motion, using
+the firmware's streamed front-range readings. Continued forward proposals do
+not issue another motor command or reset PWM. Interrupted or failed
+targets consume their entire requested distance because partial travel is unknown.
 Pause/resume does not reset this budget. A new process starts a new budget.
 
 This is a command-distance limit, not calibrated physical travel. Track slip,
@@ -15,6 +18,15 @@ the power switch reachable. A broad target about 100 cm in front allows a 50 cm
 test while retaining the 45 cm start-clearance rule. Invalid range stops the run.
 The API can choose HOLD or investigate audio before reaching the distance cap.
 Turns stay disabled in the command below. GPS does not guide this controller.
+
+Continuous mode requires firmware advertising `CAPS guarded=1 cruise=1`.
+Older firmware is rejected before dispatch; there is no unguarded fallback.
+The normal profile still uses 3 cm STEP commands. CRUISE retains local range,
+encoder, stall, heartbeat and time limits, and stops at its encoder target.
+HOLD, low-confidence proposals, stale camera/range evidence, API errors, audio
+investigation and operator STOP interrupt it. These stops remain intentional;
+only the routine stop every 3 cm has been removed. The host also stops renewing
+movement permission if processing stops supplying fresh observations.
 
 The test profile's motion confidence threshold is 0.50 (the default remains
 0.70). This permits lower-scoring forward proposals through the confidence
@@ -97,3 +109,21 @@ above contains the knock/dialog evidence.
 
 Software validation: `uv run pytest -q` passed all 920 tests, with one existing
 Starlette/httpx deprecation warning. No shared audio or dialog contracts changed.
+
+## Continuous-mode validation
+
+The subsequent continuous-mode change passed 132 focused controller/serial
+tests (`uv run --no-sync pytest -q tests/test_decision_distance.py
+tests/test_rover.py`), plus the firmware simulation
+(`uv run --no-sync python tools/check_rover_firmware.py`). Audio patrol checks
+also passed during the focused check. The firmware simulation checks uninterrupted
+power beyond 3 cm, final-target completion, obstacle/invalid-range stops,
+watchdog expiry and command deadlines. The Mega 2560 build uses 26,140 bytes of
+flash and 2,224 bytes of static RAM. The full suite was not repeated for this
+change, following the operator's request to keep testing focused.
+
+Installation is pending: USB upload timed out, and STOP/PING probes received
+corrupted serial data instead of rover acknowledgements. Reconnect the rover
+USB cable and reset the Auriga before retrying the upload. No live continuous
+movement has been validated. This update adds CRUISE/CAPS protocol support;
+it does not change the audio or deterministic dialog contracts.
