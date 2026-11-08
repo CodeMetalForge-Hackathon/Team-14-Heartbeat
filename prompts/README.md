@@ -22,6 +22,9 @@ The hookup guide is `docs/DEMO-HOOKUP.md`.
 
 **Rover recovery** (Sunday early morning, on the Pi, operator at the rover):
 - **PI-04:** find out why the Auriga stopped answering and a track ran by itself. Checks power, the port and a possible competing service before **one** clean upload. Go/no-go is at 08:00.
+- **PI-05:** continue recovery on the replacement Pi 5 with NVMe M.2 HAT+;
+  start with [the migration handoff](../docs/NEW-PI-HANDOFF.md). Recovery is
+  still pending; the preserved firmware HEX is included for the new host.
 
 Later prompts get written after we see these results:
 

@@ -43,8 +43,10 @@ firmware cause from these timeouts alone.
 
 The stable rover path is
 `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`. It initially resolved to
-`/dev/ttyUSB1`; after reconnects it resolved to `/dev/ttyUSB0`. Always use the
-stable identity: the microphone also uses a numbered ttyUSB node.
+`/dev/ttyUSB1`; after reconnects it resolved to `/dev/ttyUSB0`. Identify the
+physical device before using a numbered node. PI-04 supersedes use of this
+generic CH340 by-id alias for recovery: another CH340 board can share it.
+Identify the isolated rover's ttyUSB node and record its by-path name first.
 
 Kernel logs confirmed the rover's `1a86:7523` CH341 adapter disconnecting and
 reconnecting. An earlier reconnect affected the u-blox GPS instead. The rover
@@ -194,7 +196,183 @@ Saved evidence: [filtered USB trace and serial observations](evidence/20261108-r
 [baud comparison](evidence/20261108-rover-baud-check.json). These files contain
 only this rover's diagnostic data, not API credentials or camera/audio captures.
 
-## Validation scope
+## PI-04 recovery
+
+Reviewer updates `bbc4ec8` and `1919e4b` were fetched and fast-forwarded on
+2026-11-08. This recovery follows `prompts/PI-04-rover-recovery.md`; firmware,
+profiles and Python source remain unchanged. The Pi clock at intake was
+03:26 EST / 08:26 UTC. The prompt's 08:00 go/no-go is treated as local event
+time (America/New_York); the prompt does not explicitly specify a timezone.
+Recovery is **in progress**, not yet recovered or conclusively ruled out.
+
+The operator subsequently chose to move to a new Pi 5 with an NVMe M.2 HAT+
+and requested a GitHub handoff. See [NEW-PI-HANDOFF.md](NEW-PI-HANDOFF.md).
+This supersedes waiting for another USB connection on this host; it does not
+establish a Pi hardware fault. The new host still needs the recovery gates.
+The preserved HEX is bundled under `docs/evidence/rover-recovery/`, with its
+hash and build provenance. This recovery record is being committed at the
+operator's explicit migration request, before PI-04's hardware outcome is known.
+
+### Step 0 — preserve the build: complete
+
+Copied `/tmp/heartbeat-rover-build` to `/home/teamrover/heartbeat-rover-build`.
+The preserved files are outside Git and survive reboot. SHA-256:
+
+```text
+rover.ino.hex (73535 bytes)
+adaf180028278066cc287107827acfa2d05c5956c02cb00b747ecf83a4808575
+rover.ino.elf (137916 bytes)
+a4815a23a6f92137bb4eeffff00a2a147ca0d472928cc8e47d7398a34d2e9992
+```
+
+### Step 1 — host checks and competing service
+
+`lifescout.service` was **enabled but inactive**, stopped since 01:27:11 EST.
+Its ExecStart is
+`/home/teamrover/LifeScout/.venv/bin/python -u /home/teamrover/LifeScout/lifescout.py daemon`.
+The operator explicitly approved disabling it. Executed:
+
+```bash
+systemctl --user disable --now lifescout.service
+systemctl --user is-enabled lifescout.service
+systemctl --user is-active lifescout.service
+```
+
+The enablement symlink was removed; results were `disabled` and `inactive`.
+This prevents a future reboot from reintroducing a competing controller. It
+does not establish service contention as the cause of the recent failures:
+the service was already stopped during those attempts.
+
+No running LifeScout daemon, patrol, serial diagnostic or uploader was found.
+`vcgencmd get_throttled` returned `0x0`. The filtered kernel journal showed the
+previous disconnect/reconnect events and no under-voltage/over-current lines.
+The rover, stick and GPS were still enumerated at this initial inspection, so
+the reviewer-specified unplugged setup was not yet verified. The operator's
+initial "ok" was not treated as proof of the requested physical changes.
+At 03:30:53 EST the kernel recorded the CH341's USB disconnect. Rechecking
+while the rover was absent confirmed LifeScout disabled/inactive and Pi
+`throttled=0x0`. The microphone and GPS remained enumerated. Step 1's host
+checks are complete; the isolated step-3 hookup is still pending.
+
+### Step 2 — battery and wiring: incomplete
+
+The operator reports no multimeter, and replacing the batteries is difficult
+at present. Battery type, current measured voltage, freshness/charge, wall
+supply confirmation and the wiring inspection remain unverified. Historical
+board estimates were 7.92 V at rest and 6.77 V under lifted-track load; they are
+not new measurements and do not prove a brownout caused this incident.
+
+Fresh-pack measurement is unavailable. The proposed next step is an isolated
+no-motion communication test using the current pack, explicitly preserving the
+unknown battery condition. It cannot validate motor operation or remove the
+requirement to investigate power before lifted motion tests. The operator was
+asked to inspect the left encoder connection, sensor port 6, loose jumpers and
+any Bluetooth/wireless module, while keeping both motor cables disconnected.
+
+### Step 3 — isolated link test: approved, awaiting USB connection
+
+No new port open has occurred under PI-04. Requested setup: operator at the
+rover, Pi on wall power, stick/GPS/knocker unplugged, only Auriga connected,
+both motor cables disconnected, and explicit yes before the bounded PING.
+CAPS/STOP/STATUS follow only after a valid PONG. A failed PING permits only
+the prompt's one operator-approved power-cycle/retry before the Mac branch.
+
+The operator subsequently answered "Yes—setup checked, ready for link test".
+At 03:35 EST, however, `/dev/serial/by-id/` and `/dev/serial/by-path/` still
+showed only the M5Stick (`ttyUSB1`) and u-blox GPS (`ttyACM0`); no Auriga
+adapter was enumerated. LifeScout remained disabled/inactive. No port was
+opened and no PING was sent: the approved target is absent. The operator
+was asked to disconnect the stick/GPS and connect only the Auriga, keeping
+the motor leads unplugged, or request help identifying those plugs. Earlier
+uncertainty about the motor/encoder connectors means physical isolation is
+operator-reported, not independently inspected.
+
+Before isolation, the CH340 was `/dev/ttyUSB0`, with observed physical path
+`/dev/serial/by-path/platform-xhci-hcd.1-usbv2-0:1:1.0-port0` (also exposed
+without `usbv2`). This association is provisional until the rover alone is
+connected and checked. The generic by-id name will not select recovery ports.
+
+### Steps 4–6 — not yet reached
+
+- Clean upload: not attempted under PI-04; requires the step-3 result and a
+  separate operator yes. Use the preserved build and reidentified ttyUSB node.
+- Lifted motion: not attempted. Motor leads remain disconnected until the
+  firmware identity/STOP gate passes, then each test needs a separate yes.
+  The prompt's "no movement until step 5 passes" is read as no general patrol
+  before step 5; its specifically authorized step-5 checks are the only motion
+  exceptions after steps 1–4. No permission for those checks has been given.
+- Mac comparison: not run. If reached, exact operator-run copy/flash commands
+  are prepared below; the result remains pending. No Mac access is assumed.
+
+### Prepared step-6 Mac handoff — not executed
+
+Use only if the isolated Pi link/recovery path fails. The operator runs these
+on the Mac with motor leads still unplugged, operator present and an identified
+rover connected alone. Do not reconnect motor leads based on upload success.
+First copy the preserved image from the Pi (while the Pi is reachable):
+
+```bash
+mkdir -p ~/heartbeat-rover-recovery
+scp teamrover@heartbeat.local:/home/teamrover/heartbeat-rover-build/rover.ino.hex ~/heartbeat-rover-recovery/rover.ino.hex
+shasum -a 256 ~/heartbeat-rover-recovery/rover.ino.hex
+```
+
+Expected hash is the step-0 hash above. With the rover connected to the Mac,
+the following selects exactly one usbserial node, uses avrdude from PATH or
+the Arduino package directory, checks the copied image, and bounds the upload
+to 90 seconds. It refuses ambiguous device selection. This is an operator-run
+firmware write; do not run it before agreeing to that recovery step. Do not
+manually interrupt an upload that has begun writing.
+
+```bash
+cd ~/heartbeat-rover-recovery
+python3 - <<'PY'
+from pathlib import Path
+import glob, hashlib, shutil, subprocess
+
+image = Path('rover.ino.hex').resolve()
+expected = 'adaf180028278066cc287107827acfa2d05c5956c02cb00b747ecf83a4808575'
+if hashlib.sha256(image.read_bytes()).hexdigest() != expected:
+    raise SystemExit('Image hash mismatch; do not flash.')
+ports = sorted(set(glob.glob('/dev/cu.*usbserial*')))
+if len(ports) != 1:
+    raise SystemExit(f'Connect only the rover, then retry. Found: {ports}')
+tool = shutil.which('avrdude')
+extra = []
+if tool is None:
+    candidates = sorted((Path.home() / 'Library/Arduino15/packages/arduino/tools/avrdude').glob('*/bin/avrdude'))
+    if not candidates:
+        raise SystemExit('avrdude is unavailable. Use the Arduino-installed tool or install it through Homebrew first.')
+    binary = candidates[-1]
+    tool = str(binary)
+    config = binary.parent.parent / 'etc/avrdude.conf'
+    if config.is_file():
+        extra = ['-C', str(config)]
+cmd = [tool, *extra, '-c', 'wiring', '-p', 'm2560', '-P', ports[0],
+       '-b', '115200', '-D', '-U', f'flash:w:{image}:i']
+print('Rover node:', ports[0], flush=True)
+result = subprocess.run(cmd, timeout=90)
+raise SystemExit(result.returncode)
+PY
+```
+
+Record the complete avrdude result. Success is evidence for a Pi-side difference,
+not proof that every rover subsystem is healthy; return to step 3 on the Pi.
+A matching failure on the Mac supports removing the rover from the demo, but
+does not by itself distinguish battery, wiring, UART, reset, MCU or bootloader
+failure. Do not label an individual component proven faulty without evidence.
+
+### Recovery verification
+
+`uv run pytest -q` passed **927 tests**, with the existing Starlette/httpx
+deprecation warning, on the pulled `1919e4b` tree. This is offline software
+validation, not proof of board recovery. No additional software tests are
+needed for the documentation updates alone. The required hardware evidence
+remains missing: reliable PONG/STOP, `CAPS guarded=1 cruise=1`, lifted motion
+and interruption checks, and battery voltage during load. Root cause remains
+unproven. No claim of a half-written sketch or bootloader damage is made.
+
+## Earlier validation scope
 
 The earlier full suite passed 920 tests before the continuous-mode change.
 Continuous-mode controller/serial checks subsequently passed 132 tests, and the

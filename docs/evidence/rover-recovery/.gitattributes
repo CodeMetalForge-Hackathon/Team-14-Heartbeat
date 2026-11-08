@@ -1,0 +1,2 @@
+# Preserve the compiled artifact byte-for-byte, including Intel HEX CRLF lines.
+rover.ino.hex -text whitespace=cr-at-eol

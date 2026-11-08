@@ -4,6 +4,10 @@ Heartbeat finds people trapped under rubble using a contact microphone, a servo 
 
 ## Quickstart
 
+Moving the rover setup to a new Pi? Start with the
+[new Pi 5 / NVMe Codex handoff](docs/NEW-PI-HANDOFF.md), which includes the
+current recovery state and preserved firmware image.
+
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run these commands from the repository root. Python is pinned to 3.11; `uv` manages the environment.
 
 ```sh
