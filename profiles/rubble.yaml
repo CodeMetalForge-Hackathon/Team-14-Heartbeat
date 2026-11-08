@@ -492,6 +492,27 @@ rover:
     stop_timeout_s: 6.0
   # Maximum dialog time at each gap, in stream seconds.
   gap_timeout_s: 120.0
+  navigation:
+    # Confirmed ultrasonic connector; the line sensor on port 9 is unused.
+    sensor_port: 10
+    # Stop a forward segment when an obstacle is this close, in cm.
+    stop_cm: 30
+    # Require this much front clearance before starting a forward segment, in cm.
+    clear_cm: 45
+    # Encoder travel per autonomous forward segment, in cm.
+    step_cm: 20
+    # Clockwise in-place search turn; direction requires hardware verification.
+    turn_deg: 45
+    # Maximum consecutive search turns before holding with a blocked error.
+    max_turns: 8
+    # Interval between front-range checks during forward movement, in milliseconds.
+    poll_ms: 80
+    # Motor-off wait before measuring and choosing the next segment, in milliseconds.
+    settle_ms: 200
+    # Refuse even an in-place turn when the front obstacle is closer than this, in cm.
+    turn_clearance_cm: 15
+    # Maximum exploration time per start/resume; then stop and finish, in seconds.
+    duration_s: 120
   # Motor speed percent for route legs.
   speed_pct: 30
   # Stop the audio pipeline after the final patrol result.

@@ -65,6 +65,9 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 | --- | --- |
 | boot | `READY rover v1` |
 | `PING` | `PONG rover v1` |
+| `RANGE <port>` | `RANGE port=<port> cm=<distance> valid=<0/1>`; stationary only |
+| `NAVCFG <port> <stop_cm> <clear_cm> <step_cm> <turn_deg> <max_turns> <poll_ms> <settle_ms> <turn_clearance_cm>` | `OK NAVCFG ...`; validated settings, stationary only, RAM only |
+| `EXPLORE <seconds> <speed_pct>` | `OK EXPLORE <seconds>` only when the bounded period ends; STOP cancels it |
 | `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached within tolerance; negative distance reverses |
 | `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached within tolerance; in-place turn |
 | `STOP` | `OK STOP`, after immediately setting both motor outputs to zero |
@@ -142,10 +145,12 @@ write produces `ERR eeprom` and leaves motor output zero.
 The sketch uses the official `MeEncoderOnBoard` direct PWM API and encoder
 interrupts. It takes atomic snapshots of the AVR's 32-bit pulse counters and
 stops each wheel independently at its measured target. It does not hold position
-with PID after a move. Normal output rises at a bounded rate and decreases
-through the final quarter of encoder travel. A friction floor capped by the
-requested speed keeps the final approach finite; each target still cuts output
-immediately. This is a simple motion ramp, not closed-loop matched wheel speed.
+with PID after a move. Normal output rises at a bounded rate. Straight drives and exploration turns
+retain requested power through the final approach: the earlier distance slowdown
+caused observed low-PWM stalls. Standalone TURN keeps its original slowdown.
+Each encoder target cuts output independently within the bounded tolerance.
+This controls PWM, not closed-loop matched wheel speed; test turn accuracy and
+coasting distance after changing power behavior.
 
 Movement completion permits at most **two encoder pulses** of shortfall per
 motor, additionally capped at **1% of the requested pulse target**, rounded down.
@@ -170,7 +175,8 @@ produces `ERR stall`. A move exceeding 30 seconds, even with heartbeats, produce
 Malformed commands also stop an active move before reporting their error.
 The serial parser handles at most 64 bytes per iteration, so incoming data cannot
 indefinitely prevent the motion watchdog from running. No movement code waits
-for a target or sleeps.
+for an encoder target or sleeps. Opt-in ultrasonic sampling has an explicit
+24 ms pulse timeout and a 12 microsecond trigger pulse.
 
 `OK STOP` means motor output is disabled; it does not prove the chassis has
 finished coasting. The host must allow debris and the chassis to settle before
@@ -225,16 +231,30 @@ API and wiring references were inspected at official Makeblock commit
 - [Onboard LED ring example](https://github.com/Makeblock-official/Makeblock-Libraries/blob/21b20bbd55bbaaaae6ac14a4580d0a238c8bbd4d/examples/Me_RGBLed/MeAurigaOnBoardLEDRing/MeAurigaOnBoardLEDRing.ino): 12 LEDs on D44.
 - [Auriga firmware](https://github.com/Makeblock-official/Makeblock-Libraries/blob/21b20bbd55bbaaaae6ac14a4580d0a238c8bbd4d/examples/Firmware_for_Auriga/Firmware_for_Auriga.ino): A4 battery conversion.
 
-On 2026-11-07 this development machine had arduino-cli 1.5.1 and Arduino AVR core
-1.8.8, but no Makeblock library. No toolchain/library was installed and no target
-compile, upload, serial connection, or physical motion was attempted. A native
-C++ harness compiled the actual sketch against fake serial, encoder, ring, and
-EEPROM APIs with AddressSanitizer and UndefinedBehaviorSanitizer. It checked
-protocol replies, EEPROM persistence/corruption, strict numeric parsing and
-2,000 malformed-input cases, motion limits, signed moves, ramping, independent
-wheel completion, STOP priority/cancellation, heartbeat expiry, stall handling,
-and the absolute deadline. This does not replace the target compile or hardware
-checks above.
+The updated sketch compiled for `arduino:avr:mega:cpu=atmega2560` with Arduino
+AVR core 1.8.8 and the pinned Makeblock library. `tools/check_rover_firmware.py`
+compiles this same sketch against fake Arduino I/O with address/undefined-behavior
+sanitizers and exercises navigation and stop guards without hardware. No
+autonomous navigation upload or physical run was performed by the coding agent.
+
+For the installed Makeblock library, `dot_a_linkage=true` in its
+`library.properties` is needed to avoid linking unused MegaPi globals alongside
+Auriga globals. The local test toolchain uses that archive-link setting.
+
+## Autonomous exploration
+
+See [ROVER-AUDIO](../../docs/ROVER-AUDIO.md#autonomous-local-exploration-ultrasonic-port-10)
+for sensor validation and the CLAP exploration command. Navigation configuration
+comes from YAML through NAVCFG; there is no movement or retained navigation mode
+on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is on 10. Port 9's
+line sensor is not used. EXPLORE requires configuration and lasts 1–600 seconds.
+It emits `NAV FORWARD <cm>`, `NAV TURN <cm>`, and `NAV OBSTACLE <cm>` progress lines.
+Internal DRIVE/TURN steps do not emit completion acknowledgements. STOP cancels
+the entire exploration transaction and prevents a delayed OK EXPLORE reply.
+
+Unknown echo, blocked search, overly close front obstacle, motor stall, wrong
+encoder direction and lost heartbeat all disable outputs. The front sensor
+does not establish side clearance during turns and cannot detect drops.
 
 ## Restore the Ranger's original firmware
 

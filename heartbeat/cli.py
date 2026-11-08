@@ -121,6 +121,8 @@ def _parser() -> argparse.ArgumentParser:
         motion = rover_commands.add_parser(name)
         motion.add_argument(unit, type=float)
         motion.add_argument("--speed", type=float, help="motor speed percent; defaults to the profile")
+    ranging = rover_commands.add_parser("range", help="read front ultrasonic distance without moving")
+    ranging.add_argument("--sensor-port", type=int, choices=range(6, 11), required=True)
     led = rover_commands.add_parser("led")
     for color in ("r", "g", "b"):
         led.add_argument(color, type=int)
@@ -131,6 +133,9 @@ def _parser() -> argparse.ArgumentParser:
     patrol.add_argument("--speaker-device", type=_device)
     patrol.add_argument("--route", type=Path, default=Path("profiles/route.yaml"))
     patrol.add_argument("--profile", default="rubble")
+    patrol.add_argument("--explore", action="store_true", help="navigate using front ultrasonic sensing instead of a fixed route")
+    patrol.add_argument("--sensor-port", type=int, choices=range(6, 11))
+    patrol.add_argument("--explore-seconds", type=_positive_float, help="bounded exploration duration per start/resume (max 600)")
     patrol.add_argument("--dry-run", action="store_true", help="fake rover and simulated survivor; no hardware")
     patrol.add_argument("--dashboard", action="store_true")
     patrol.add_argument("--host")
@@ -398,6 +403,9 @@ class _DialogConsole:
                 text += " · holding; review evidence, then r + Enter to resume"
             if data.get("fault"):
                 text += f" · {data['fault']}"
+        elif event.type == "rover" and data.get("reply", {}).get("kind") == "NAV":
+            reply = data["reply"]
+            text = f"NAV {reply['state']} · front {reply['cm']:.1f} cm"
         elif event.type == "patrol_cue":
             text = f"ROVER {data['phase']}: {data['label']} at {data['end']:.2f}s"
         elif event.type == "round_result":
@@ -592,6 +600,9 @@ def _rover(args, profile, bus) -> int:
             ok = link.drive(args.cm, args.speed)
         elif name == "turn":
             ok = link.turn(args.deg, args.speed)
+        elif name == "range":
+            reading = link.range(args.sensor_port)
+            ok = reading is not None and reading["valid"]
         elif name == "led":
             ok = link.led(args.r, args.g, args.b)
         else:
@@ -625,7 +636,21 @@ def _patrol(args, profile, bus) -> int:
     from .prompter import make_prompter
     from .rover import RoverLink
 
-    route = load_route(args.route)
+    if args.explore:
+        navigation = dict(profile.rover["navigation"])
+        if args.sensor_port is not None:
+            navigation["sensor_port"] = args.sensor_port
+        duration = args.explore_seconds if args.explore_seconds is not None else navigation["duration_s"]
+        from .rover import navigation_args
+        navigation_args(navigation)
+        if not profile.rover["audio_stop"]["enabled"] or profile.rover["audio_stop"]["scheduled_listen"]:
+            raise ValueError("Use --profile clap-knocks for exploration with audio stops")
+        profile = replace(profile, rover={**profile.rover, "navigation": navigation})
+        route = load_route([{"name": "Explore 1", "moves": [["explore", duration]]}])
+    else:
+        if args.sensor_port is not None or args.explore_seconds is not None:
+            raise ValueError("--sensor-port and --explore-seconds require --explore")
+        route = load_route(args.route)
     if not args.dry_run and not args.rover:
         raise ValueError("--rover is required unless --dry-run is selected")
     profile = replace(profile, dialog=dict(profile.dialog, auto_challenge=False),
@@ -638,6 +663,8 @@ def _patrol(args, profile, bus) -> int:
     try:
         directory = _run_directory(args, profile)
         if args.dry_run:
+            if args.explore:
+                profile = replace(profile, classifier=replace(profile.classifier, name="none"))
             runtime, controller = prepare_patrol_simulation(
                 profile, route, bus=bus, run_dir=directory, argv=args._argv,
                 seed=args.seed, realtime=args.dashboard)

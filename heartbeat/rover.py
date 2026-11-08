@@ -27,6 +27,27 @@ def _finite(value, name: str) -> float:
     return float(value)
 
 
+NAVIGATION_KEYS = ("sensor_port", "stop_cm", "clear_cm", "step_cm", "turn_deg",
+                   "max_turns", "poll_ms", "settle_ms", "turn_clearance_cm")
+
+
+def navigation_args(settings):
+    """Validate the same physical bounds as the controller, before opening USB."""
+    try:
+        values = tuple(_finite(settings[key], key) for key in NAVIGATION_KEYS)
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Missing rover navigation settings") from exc
+    port, stop, clear, step, turn, tries, poll, settle, clearance = values
+    if (port not in range(6, 11) or not 20 <= stop <= 100 or not stop + 5 <= clear <= 200
+            or not 1 <= step <= 30 or not 15 <= turn <= 90
+            or not tries.is_integer() or not 1 <= tries <= 16
+            or not poll.is_integer() or not 60 <= poll <= 200
+            or not settle.is_integer() or not 100 <= settle <= 1000
+            or not 5 <= clearance < stop):
+        raise ValueError("Invalid rover navigation settings")
+    return values
+
+
 def parse_reply(line: str | bytes) -> dict:
     """Parse one complete v1 reply; reject malformed lines and other devices."""
     if isinstance(line, bytes):
@@ -48,7 +69,7 @@ def parse_reply(line: str | bytes) -> dict:
         return {"kind": "ERR", "reason": " ".join(words[1:]), "raw": raw}
     if kind == "OK" and len(words) >= 2:
         command = words[1]
-        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "LED": 3, "CAL": 2}
+        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1, "NAVCFG": 9, "LED": 3, "CAL": 2}
         if command not in counts or len(words) != counts[command] + 2:
             raise ValueError(f"Malformed rover acknowledgement: {raw}")
         try:
@@ -57,9 +78,28 @@ def parse_reply(line: str | bytes) -> dict:
             raise ValueError(f"Malformed rover acknowledgement: {raw}") from exc
         if not all(math.isfinite(arg) for arg in args):
             raise ValueError("Nonfinite rover acknowledgement")
+        if command == "NAVCFG":
+            navigation_args(dict(zip(NAVIGATION_KEYS, args)))
         if command == "LED" and any(not arg.is_integer() or not 0 <= arg <= 255 for arg in args):
             raise ValueError("Malformed rover LED acknowledgement")
         return {"kind": "OK", "command": command, "args": args, "raw": raw}
+    if kind == "NAV" and len(words) == 3:
+        cm = float(words[2])
+        if words[1] not in {"FORWARD", "TURN", "OBSTACLE"} or not math.isfinite(cm) or not 2 <= cm <= 400:
+            raise ValueError("Invalid navigation observation")
+        return {"kind": "NAV", "state": words[1], "cm": cm, "raw": raw}
+    if kind == "RANGE" and len(words) == 4:
+        values = dict(word.split("=", 1) for word in words[1:])
+        if values.keys() != {"port", "cm", "valid"}:
+            raise ValueError("Invalid range fields")
+        port, cm = int(values["port"]), float(values["cm"])
+        if (port not in range(6, 11) or values["valid"] not in {"0", "1"}
+                or not math.isfinite(cm)
+                or (values["valid"] == "1" and not 2 <= cm <= 400)
+                or (values["valid"] == "0" and cm != -1)):
+            raise ValueError("Invalid range reading")
+        return {"kind": "RANGE", "port": port, "cm": cm,
+                "valid": values["valid"] == "1", "raw": raw}
     if kind == "STATUS" and len(words) == 4:
         try:
             values = dict(word.split("=", 1) for word in words[1:])
@@ -149,13 +189,13 @@ class _Commands:
 
     def _validate(self, command: str, args: tuple) -> tuple:
         count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0,
-                 "DRIVE": 2, "TURN": 2, "LED": 3, "CAL": 2}
+                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "NAVCFG": 9, "RANGE": 1, "LED": 3, "CAL": 2}
         if command not in count or len(args) != count[command]:
             raise ValueError("Invalid rover command")
         numbers = tuple(_finite(value, command) for value in args)
-        if command in {"DRIVE", "TURN"}:
-            bound = self.cfg.max_drive_cm if command == "DRIVE" else self.cfg.max_turn_deg
-            if not -bound <= numbers[0] <= bound:
+        if command in {"DRIVE", "TURN", "EXPLORE"}:
+            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command == "DRIVE" else self.cfg.max_turn_deg)
+            if not (1 if command == "EXPLORE" else -bound) <= numbers[0] <= bound:
                 raise ValueError(f"{command} exceeds host distance/angle limit")
             if not 1 <= numbers[1] <= self.cfg.max_speed_pct:
                 raise ValueError("Rover speed must be between 1 and the profile limit")
@@ -163,6 +203,10 @@ class _Commands:
                 raise ValueError("Rover E-STOP is latched; explicit reset_estop is required")
             if self.engine_is_listening():
                 raise ValueError("Rover movement refused while sentinel is listening")
+        if command == "NAVCFG":
+            navigation_args(dict(zip(NAVIGATION_KEYS, numbers)))
+        if command == "RANGE" and numbers[0] not in range(6, 11):
+            raise ValueError("Ultrasonic sensor port must be 6 through 10")
         if command == "LED" and any(not value.is_integer() or not 0 <= value <= 255 for value in numbers):
             raise ValueError("Rover LED channels must be integers from 0 to 255")
         if command == "CAL" and any(not self.cfg.calibration_min <= v <= self.cfg.calibration_max for v in numbers):
@@ -174,6 +218,15 @@ class _Commands:
 
     def turn(self, deg, speed_pct=None):
         return self._command("TURN", (deg, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+
+    def configure_navigation(self, settings):
+        return self._command("NAVCFG", navigation_args(settings))
+
+    def explore(self, seconds, speed_pct=None):
+        return self._command("EXPLORE", (seconds, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+
+    def range(self, sensor_port):
+        return self._command("RANGE", (sensor_port,))
 
     def ping(self):
         return self._command("PING", ())
@@ -214,7 +267,9 @@ class _Pending:
             return reply["kind"] == "PONG"
         if self.command == "STATUS":
             return reply["kind"] == "STATUS"
-        expected = self.args[:1] if self.command in {"DRIVE", "TURN"} else self.args
+        if self.command == "RANGE":
+            return reply["kind"] == "RANGE" and reply["port"] == self.args[0]
+        expected = self.args[:1] if self.command in {"DRIVE", "TURN", "EXPLORE"} else self.args
         return (reply["kind"] == "OK" and reply["command"] == self.command
                 and len(reply["args"]) == len(expected)
                 and all(math.isclose(a, b, rel_tol=1e-5, abs_tol=1e-5)
@@ -411,20 +466,22 @@ class RoverLink(_Commands):
                 self._connect()
                 if epoch != self._stop_epoch:
                     raise ValueError("Rover command cancelled by STOP")
-                motion = command in {"DRIVE", "TURN"}
+                motion = command in {"DRIVE", "TURN", "EXPLORE"}
                 if motion:
                     self.moving = True
                     self._heartbeat_cancel = threading.Event()
                     threading.Thread(target=self._heartbeat, args=(self._connection, self._heartbeat_cancel), daemon=True,
                                      name="rover-heartbeat").start()
                 try:
-                    reply = self._perform(command, args, self.cfg.move_timeout_s if motion else self.cfg.command_timeout_s,
+                    timeout = (args[0] + self.cfg.command_timeout_s if command == "EXPLORE" else
+                               self.cfg.move_timeout_s if motion else self.cfg.command_timeout_s)
+                    reply = self._perform(command, args, timeout,
                                           epoch=epoch)
                 finally:
                     if motion:
                         self.moving = False
                         self._heartbeat_cancel.set()
-                return reply if command == "STATUS" else reply is not None
+                return reply if command in {"STATUS", "RANGE"} else reply is not None
         except Exception as exc:
             self._error(exc, command=command)
             # Invalid requests do not touch hardware. A transport fault or a
@@ -435,7 +492,7 @@ class RoverLink(_Commands):
                 else:
                     self._stopping.clear()
                 self._disconnect()
-            return None if command == "STATUS" else False
+            return None if command in {"STATUS", "RANGE"} else False
 
     def stop(self):
         """Send STOP without acquiring the command lock, aborting a move waiter."""
@@ -511,6 +568,8 @@ class FakeRover(_Commands):
     def duration(self, command, value, speed_pct=None):
         command = command.upper()
         args = self._validate(command, (value, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+        if command == "EXPLORE":
+            return args[0]
         rate = self.cfg.fake_speed_cm_s if command == "DRIVE" else self.cfg.fake_turn_deg_s
         return abs(args[0]) / rate * self.cfg.default_speed_pct / args[1]
 
@@ -520,24 +579,26 @@ class FakeRover(_Commands):
         try:
             args = self._validate(command, args)
             with self._lock:
-                if self.moving and command in {"DRIVE", "TURN", "CAL", "LED"}:
+                if self.moving and command in {"DRIVE", "TURN", "EXPLORE", "NAVCFG", "RANGE", "CAL", "LED"}:
                     raise ValueError("Fake rover is busy")
                 item = {"t": self.clock(), "command": command, "args": list(args)}
                 self.trace.append(item)
                 epoch = self._stop_epoch
-                if command in {"DRIVE", "TURN"}:
+                if command in {"DRIVE", "TURN", "EXPLORE"}:
                     self._finish_t = self.clock() + self.duration(command, *args)
                     self._motion = (command, args)
                     self.moving = True
                 self._emit("command", command=command, args=list(args))
-                if command in {"DRIVE", "TURN"}:
+                if command in {"DRIVE", "TURN", "EXPLORE"}:
                     return self._stop_epoch == epoch and self.moving
                 reply = {"kind": "STATUS", "batt": None, "moving": self.moving, "enc": [0, 0]} if command == "STATUS" else {"kind": "OK", "command": command, "args": list(args)}
+                if command == "RANGE":
+                    reply = {"kind": "RANGE", "port": int(args[0]), "cm": 100.0, "valid": True, "simulated": True}
                 self._emit("reply", reply=reply)
-                return reply if command == "STATUS" else True
+                return reply if command in {"STATUS", "RANGE"} else True
         except (ValueError, TypeError) as exc:
             self._error(exc, command=command)
-            return None if command == "STATUS" else False
+            return None if command in {"STATUS", "RANGE"} else False
 
     def advance(self, t):
         t = _finite(t, "stream time")
