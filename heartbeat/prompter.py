@@ -33,6 +33,12 @@ VOICE_TEXT = {
     "q_move": "Can you move? Knock two times for yes. One time for no.",
     "q_hurt": "Are you hurt? Knock two times for yes. One time for no.",
     "reassure": "We are still here. Knock if anything changes.",
+    # Spoken counts after a challenge pattern (dialog.announce_count).
+    "count_1": "Your turn. Knock once.",
+    "count_2": "Your turn. Knock two times.",
+    "count_3": "Your turn. Knock three times.",
+    "count_4": "Your turn. Knock four times.",
+    "count_5": "Your turn. Knock five times.",
 }
 BAUD_RATE = 115200  # Fixed knocker v1 wire protocol.
 MAX_REPLY_BYTES = 256  # Bound corrupt serial lines, as in the P02 test tool.

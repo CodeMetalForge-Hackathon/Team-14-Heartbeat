@@ -362,3 +362,41 @@ def test_constructor_is_pure_with_complete_dict_and_rejects_unknown_or_missing_f
     cfg.pop("window_s")
     with pytest.raises(ValueError, match="Missing dialog"):
         DialogEngine(cfg, lambda *_: None, 1)
+
+
+def test_announce_count_speaks_the_expected_count_after_each_pattern():
+    engine, _ = make_engine(announce_count=True)
+    assert engine.command("challenge", 0) == []
+    t = engine.cfg.pre_listen_s
+    assert engine.tick(t) == [PromptVoice("copy_knocks"), PromptKnocks(3, engine.cfg.interval_s),
+                              PromptVoice("count_3")]
+    t, actions = answer_round(engine, t + 1, 1)
+    t += engine.cfg.pre_listen_s
+    later = engine.tick(t)
+    assert later == [PromptKnocks(engine._expected, engine.cfg.interval_s), PromptVoice(f"count_{engine._expected}")]
+
+
+def test_announce_count_rejects_counts_without_a_voice():
+    with pytest.raises(ValueError, match="announce_count"):
+        DialogConfig.parse({**load_profile().dialog, "announce_count": True, "patterns": [3, 6]})
+
+
+def test_announce_count_is_optional_and_off_by_default():
+    values = dict(load_profile().dialog)
+    values.pop("announce_count", None)
+    assert DialogConfig.parse(values).announce_count is False
+
+
+def test_one_required_match_confirms_after_a_single_unlikely_round():
+    engine, _ = make_engine(min_matched_rounds=1, p_confirm=0.001, patterns=[3, 4, 5])
+    start = start_challenge(engine)
+    t, actions = answer_round(engine, start + 1, 3)
+    assert engine.rounds[-1]["matched"] and engine.rounds[-1]["p"] <= 0.001
+    assert engine.status == "CONFIRMED"
+
+
+def test_one_required_match_still_needs_the_probability_ceiling():
+    engine, _ = make_engine(min_matched_rounds=1, p_confirm=1e-9, patterns=[3, 4, 5])
+    start = start_challenge(engine)
+    answer_round(engine, start + 1, 3)
+    assert engine.rounds[-1]["matched"] and engine.status != "CONFIRMED"

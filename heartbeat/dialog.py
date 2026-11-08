@@ -25,6 +25,11 @@ class PromptKnocks:
 
 Action: TypeAlias = PromptVoice | PromptKnocks
 
+# Spoken-count voices exist for counts 1..MAX_ANNOUNCED_COUNT (prompter count_<n>).
+MAX_ANNOUNCED_COUNT = 5
+# Dialog keys a profile may omit; their dataclass defaults apply.
+_OPTIONAL_KEYS = frozenset({"announce_count"})
+
 
 @dataclass(frozen=True)
 class DialogConfig:
@@ -60,6 +65,8 @@ class DialogConfig:
     question_early_close_s: float
     questions: list[str]
     profile: str
+    # Optional: speak "Knock N times" after each challenge pattern (voices count_1..count_5).
+    announce_count: bool = False
 
     @classmethod
     def parse(cls, cfg):
@@ -70,7 +77,7 @@ class DialogConfig:
         if not isinstance(raw, Mapping):
             raise ValueError("dialog configuration must be a mapping or DialogConfig")
         expected = {field.name for field in fields(cls)}
-        unknown, missing = set(raw) - expected, expected - set(raw)
+        unknown, missing = set(raw) - expected, expected - set(raw) - _OPTIONAL_KEYS
         if unknown:
             raise ValueError(f"Unknown dialog keys: {', '.join(sorted(map(str, unknown)))}")
         if missing:
@@ -91,9 +98,13 @@ class DialogConfig:
             raise ValueError("dialog.p_confirm must be at most one")
         if result.bounce_gap_ratio >= 1:
             raise ValueError("dialog.bounce_gap_ratio must be below one")
-        for name in ("auto_challenge", "auto_interview", "require_silence_after", "reject_bounce"):
+        for name in ("auto_challenge", "auto_interview", "require_silence_after", "reject_bounce",
+                     "announce_count"):
             if not isinstance(getattr(result, name), bool):
                 raise ValueError(f"dialog.{name} must be boolean")
+        if result.announce_count and any(
+                isinstance(k, int) and k > MAX_ANNOUNCED_COUNT for k in [result.first_pattern, *result.patterns]):
+            raise ValueError(f"dialog.announce_count supports challenge counts up to {MAX_ANNOUNCED_COUNT}")
         if (not isinstance(result.patterns, list) or len(set(result.patterns)) < 2
                 or any(isinstance(k, bool) or not isinstance(k, int) or k < 1 for k in result.patterns)):
             raise ValueError("dialog.patterns must contain at least two distinct positive integer counts")
@@ -402,7 +413,10 @@ class DialogEngine:
         self._awaiting_prompts, self._prompt_kind = True, "round"
         self._transition("PROMPTING", t)
         knocks = PromptKnocks(self._expected, self.cfg.interval_s)
-        return [PromptVoice("copy_knocks"), knocks] if first else [knocks]
+        actions = [PromptVoice("copy_knocks"), knocks] if first else [knocks]
+        if self.cfg.announce_count:
+            actions.append(PromptVoice(f"count_{self._expected}"))
+        return actions
 
     def _finish_window(self, t):
         window = self._window
@@ -445,7 +459,7 @@ class DialogEngine:
         self._empty_windows = self._empty_windows + 1 if heard == 0 else 0
         matches = [result for result in self.rounds if result["matched"]]
         if (len(matches) >= self.cfg.min_matched_rounds
-                and len({result["expected"] for result in matches}) >= 2
+                and len({result["expected"] for result in matches}) >= min(2, self.cfg.min_matched_rounds)
                 and self.combined_p <= self.cfg.p_confirm):
             self._transition("CONFIRMED", t, status="CONFIRMED")
             if self.cfg.auto_interview:

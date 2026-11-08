@@ -13,3 +13,11 @@ dialog:
   window_s: 8.5
   # Latest first answer knock after the window opens; live survivors reacted in about 3.2-3.3 s.
   response_start_max_s: 4.5
+  # Say "Your turn. Knock N times." after each pattern so the survivor need not count.
+  announce_count: true
+  # One copied pattern confirms when it is unlikely enough by chance (below).
+  min_matched_rounds: 1
+  # Chance-match ceiling: one quiet-room 3-knock match is about 1 in 2,400; 4 knocks about 1 in 68,000.
+  p_confirm: 0.001
+  # No 2-knock rounds: a single 2-knock match is only about 1 in 115 by chance.
+  patterns: [3, 4, 5]
