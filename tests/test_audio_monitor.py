@@ -221,3 +221,35 @@ def test_existing_monitor_profiles_without_breathing_still_work(profile):
     cfg = profile.classifier.clap["monitor"]
     del cfg["prompts"]["BREATHING"]
     validate_monitor(cfg)
+
+
+def test_patrol_discards_moving_pending_results_and_collects_fresh_stationary_audio(profile):
+    monitor, bus, events = make_monitor(profile)
+    bus.publish("patrol", 0, state="MOVING", audio_stop_enabled=True)
+    feed(monitor, 0, 190, poll=False)
+    future = Future()
+    monitor.poll(SimpleNamespace(submit=lambda *args: future))
+    bus.publish("patrol", 3.04, state="STOPPING", audio_stop_enabled=True)
+    future.set_result(result())
+    monitor.poll()
+    feed(monitor, 190, 250)
+    bus.publish("patrol", 4, state="SETTLING", audio_stop_enabled=True)
+    feed(monitor, 250, 375)
+    assert not any(e.type == "audio_observation" for e in events)
+    assert monitor.end == 375 * 256  # Capture continued throughout the stop.
+    bus.publish("patrol", 6, state="VERIFYING", audio_stop_enabled=True)
+    feed(monitor, 375, 470)
+    bus.publish("patrol", 7.52, state="VERIFYING", audio_stop_enabled=True, battery=7.5)
+    feed(monitor, 470, 563)
+    observations = [e for e in events if e.type == "audio_observation"]
+    assert len(observations) == 1 and observations[0].data["start"] >= 6
+    monitor.close()
+
+
+def test_patrol_transition_cannot_remove_physical_prompt_gate(profile):
+    monitor, bus, events = make_monitor(profile)
+    bus.publish("prompt_start", 0)
+    bus.publish("patrol", 0, state="VERIFYING", audio_stop_enabled=True)
+    feed(monitor, 0, 250)
+    assert not any(e.type == "audio_observation" for e in events)
+    monitor.close()

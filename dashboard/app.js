@@ -63,7 +63,7 @@
     const running = connected && patrol && state.pipeline_running !== false && !roverBusy && !busy;
     for (const button of document.querySelectorAll("[data-patrol-command]")) {
       const resume = button.dataset.patrolCommand === "resume";
-      const allowed = !patrol?.done && !patrol?.estopped && (resume ? patrol?.paused : !patrol?.paused);
+      const allowed = !patrol?.done && !patrol?.estopped && !patrol?.fault && (resume ? patrol?.paused : !patrol?.paused);
       button.disabled = !(running && allowed);
     }
     for (const row of patrolRows.values()) {
@@ -76,7 +76,9 @@
   }
   function patrolPhase(patrol) {
     if (patrol.estopped) return "E-STOP";
-    return ({MOVING: "Moving", SETTLING: "Settling", LISTENING: "Listening", PAUSED: "Paused",
+    return ({MOVING: "Exploring", STOPPING: "Waiting for STOP acknowledgement", SETTLING: "Settling",
+      VERIFYING: "Verifying fresh audio", REVIEW: "Awaiting operator review", FAULT: "Motion fault — check rover",
+      LISTENING: "Challenge and response", PAUSED: "Paused",
       REPORTING: "Recording result", DRAINING: "Finishing dialog", DONE: "Route complete",
       ABORTED: "Aborted", ESTOP: "E-STOP", IDLE: "Ready"})[patrol.state] || String(patrol.state || "Ready").replaceAll("_", " ");
   }
@@ -107,7 +109,11 @@
     panel.dataset.phase = patrol.estopped ? "ESTOP" : patrol.state;
     text("patrol-state", patrolPhase(patrol));
     text("patrol-gap", patrol.gap);
-    text("patrol-motors", patrol.moving ? "Moving" : "Stopped");
+    text("patrol-motors", patrol.fault ? "Stop unverified" : patrol.state === "STOPPING" ? "Stopping…" : patrol.moving ? "Moving" : "Stopped");
+    const cue = patrol.verified_cue || patrol.trigger;
+    text("patrol-audio", patrol.fault || (cue
+      ? `${cue.label} · ${Number(cue.end).toFixed(1)}s · possible person; review evidence`
+      : patrol.audio_stop_enabled ? "Audio investigation enabled" : "Scheduled listening stops"));
     const battery = patrol.battery;
     text("patrol-battery", typeof battery === "number" && Number.isFinite(battery) && battery >= 0 ? `${battery.toFixed(2)} V` : "—");
     byId("patrol-arrival-warning").hidden = !patrol.arrival_unverified;
@@ -134,6 +140,8 @@
       if (result?.arrival_unverified) notes.push("Arrival unverified");
       if (result?.noisy) notes.push("Noise limited the check");
       if (result?.reason === "TIMEOUT") notes.push("Listening timed out");
+      if (result?.reason === "UNCONFIRMED") notes.push("No fresh qualifying signal; unconfirmed");
+      if (result?.reason === "AUDIO_ERROR") notes.push("Audio verification incomplete");
       note.textContent = notes.join(" · "); note.hidden = !notes.length;
       row.cells[2].textContent = result?.odds || "—";
       row.cells[3].textContent = answerSummary(result?.answers);
@@ -219,6 +227,7 @@
       case "audio_observation":
         return `${d.label} · score ${Number(d.score || 0).toFixed(2)}${d.alert ? " · Possible distress — review" : ""}${d.transcript ? ` · Heard: ${d.transcript}` : ""}${d.matched_phrases?.length ? ` · HELP_PHRASE: ${d.matched_phrases.join(", ")}` : ""}`;
       case "audio_monitor_status": return d.message || "Audio monitor status";
+      case "patrol_cue": return `${d.phase === "trigger" ? "Stopping to investigate" : "Fresh stationary evidence"}: ${d.label}`;
       case "sound": {
         const top = d.top?.[0]?.[0];
         return `${d.gated ? "Our prompt / gated sound" : d.candidate ? "Candidate knock" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;

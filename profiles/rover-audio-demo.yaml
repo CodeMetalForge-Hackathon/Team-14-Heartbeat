@@ -1,0 +1,13 @@
+# Scripted state-machine demo: no hardware, network, CLAP or model weights.
+classifier:
+  name: none
+rover:
+  audio_stop:
+    # Enable stop/settle/verify/review for the synthetic demonstration.
+    enabled: true
+    # Stand-in window length for the injected stationary audio observation.
+    demo_window_s: 3.0
+  # Inject explicitly simulated SCREAM observations during travel and verification.
+  sim_audio_cue: true
+  # The first interrupted stop has the simulated answering survivor.
+  sim_survivor_gap: Gap 1

@@ -12,6 +12,8 @@ import threading
 
 import yaml
 
+from .onset import CLIP_SAMPLES, PRE_SAMPLES, SAMPLE_RATE
+
 
 # These are protocol/state contracts, rather than tunable timing values.
 _ACTIVE_DIALOG = {"PROMPTING", "PRE_LISTEN", "RESPONSE_WINDOW", "INTERVIEW"}
@@ -74,6 +76,19 @@ class Patrol:
         self.prompter = prompter
         self.route = load_route(route)
         self.cfg = dict(getattr(cfg, "rover", cfg))
+        self.audio_stop = dict(self.cfg.get("audio_stop", {}))
+        self.audio_enabled = self.audio_stop.get("enabled", False)
+        if not isinstance(self.audio_enabled, bool):
+            raise ValueError("rover.audio_stop.enabled must be boolean")
+        if self.audio_enabled:
+            for key in ("verify_s", "max_age_s", "knock_window_s", "stop_timeout_s"):
+                value = self.audio_stop.get(key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value <= 0):
+                    raise ValueError(f"rover.audio_stop.{key} must be positive and finite")
+            count = self.audio_stop.get("knock_count")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 2:
+                raise ValueError("rover.audio_stop.knock_count must be an integer >= 2")
         for key in ("settle_s", "gap_timeout_s", "speed_pct"):
             value = self.cfg[key]
             if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -108,6 +123,13 @@ class Patrol:
         self._pending_result = None
         self._paused_phase = None
         self._prompt_gate_until = 0.0
+        self._phase_started = 0.0
+        self._knocks = []
+        self._trigger = None
+        self._verified_cue = None
+        self._verification_error = None
+        self._fault_reason = None
+        self._stop_thread = None
         self._jobs = queue.Queue()
         self._virtual = bool(getattr(rover, "virtual", False))
         self._worker_thread = None
@@ -125,8 +147,122 @@ class Patrol:
         self._unsubscribe = pipeline.bus.subscribe(self._event)
 
     def _event(self, event):
-        if event.type == "prompt_end" and self.engine is not None:
+        if event.type == "prompt_start":
+            self._prompt_gate_until = math.inf
+            self._knocks.clear()
+        elif event.type == "prompt_end" and self.engine is not None:
             self._prompt_gate_until = event.t + self.engine.gate_tail_s
+        if not self.audio_enabled or self.done or self._halted:
+            return
+        if event.type == "error" and event.data.get("where") == "audio_monitor":
+            if self.state == "VERIFYING":
+                self._verification_error = str(event.data.get("message", "Audio monitor failed"))
+            return
+        if self.state not in {"MOVING", "VERIFYING"}:
+            return
+        cue = self._audio_cue(event)
+        if cue is None:
+            return
+        if self.state == "MOVING":
+            self._request_audio_stop(cue)
+        elif self._verified_cue is None:
+            self._verified_cue = cue
+            self.pipeline.bus.publish("patrol_cue", self.pipeline.t, phase="verification", **cue)
+
+    def _audio_cue(self, event):
+        """Moving audio is a candidate only, never an answer to the dialog.
+
+        Patrol gates all moving/verification knocks out of DialogEngine. We may
+        inspect those gated candidates here, but only if their entire clip is
+        newer than this phase and the last physical prompt's gate tail.
+        """
+        data = event.data
+        if event.type == "audio_observation":
+            if not data.get("possible_distress"):
+                return None
+            if data.get("label") not in {"SCREAM", "SHOUT", "CRYING"} and not data.get("matched_phrases"):
+                return None
+            start, end = data.get("start"), event.t
+            label = "HELP_PHRASE" if data.get("matched_phrases") else data["label"]
+        elif event.type == "sound":
+            # Passthrough accepts every bump; it must never drive this policy.
+            if not data.get("is_knock") or data.get("classifier") in {None, "none"}:
+                return None
+            start = event.t - PRE_SAMPLES / SAMPLE_RATE
+            end = start + CLIP_SAMPLES / SAMPLE_RATE
+            label = "KNOCK_BURST"
+        else:
+            return None
+        if (not isinstance(start, (int, float)) or not math.isfinite(start)
+                or not math.isfinite(end) or end < start
+                or start < max(self._phase_started, self._prompt_gate_until)
+                or self.state == "VERIFYING" and end > self._deadline
+                or not 0 <= self.pipeline.t - end <= self.audio_stop["max_age_s"]):
+            return None
+        if event.type == "sound":
+            self._knocks = [t for t in self._knocks if event.t - self.audio_stop["knock_window_s"] <= t < event.t]
+            self._knocks.append(event.t)
+            if len(self._knocks) < self.audio_stop["knock_count"]:
+                return None
+            self._knocks.clear()
+        return {"label": label, "start": start, "end": end, "score": data.get("score"),
+                "transcript": data.get("transcript", ""),
+                "matched_phrases": data.get("matched_phrases", [])}
+
+    def _request_audio_stop(self, cue):
+        # An operator STOP/pause can arrive between event qualification and
+        # here. Never supersede its generation or reopen its motion interlock.
+        with self._control_lock:
+            if self._halted or self.done or self.state != "MOVING":
+                return
+            self._halted = True
+            self._generation += 1
+            generation = self._generation
+        self._trigger = cue
+        self._interrupted_move = self._arrival_unverified = True
+        self._virtual_move = None
+        self._close_gate()
+        self._deadline = self.pipeline.t + self.audio_stop["stop_timeout_s"]
+        self._emit_state("STOPPING")
+        self.pipeline.bus.publish("patrol_cue", self.pipeline.t, phase="trigger", **cue)
+
+        def stop():
+            ok = self._stop_now()
+            self.pipeline.call_soon(lambda: self._audio_stopped(generation, ok))
+
+        if self._virtual:
+            stop()
+        else:
+            # The normal worker may be waiting for DRIVE. STOP must bypass it.
+            self._stop_thread = threading.Thread(target=stop, name="heartbeat-audio-stop", daemon=True)
+            self._stop_thread.start()
+
+    def _audio_stopped(self, generation, ok):
+        with self._control_lock:
+            if generation != self._generation or self.done or self.state != "STOPPING":
+                return
+            if ok:
+                self._halted = False
+        if not ok:
+            self._audio_fault("STOP was not acknowledged; motion remains locked")
+            return
+        self._begin_settle()
+
+    def _audio_fault(self, message):
+        self._invalidate()
+        self._fault_reason = message
+        self._virtual_move = None
+        self._close_gate()
+        self._emit_state("FAULT")
+        self._error(message)
+        # Keep capture alive, but latch the motion interlock and retry E-STOP.
+        threading.Thread(target=self._stop_now, args=(True,), daemon=True).start()
+
+    def _begin_verify(self):
+        self._engine_command("reset")
+        self._verified_cue = self._verification_error = None
+        self._deadline = self.pipeline.t + self.audio_stop["verify_s"]
+        self._emit_state("VERIFYING")
 
     @property
     def engine(self):
@@ -154,7 +290,11 @@ class Patrol:
     def snapshot(self):
         return {"state": self.state, "gap": self.gap_name, "index": self.gap_index,
                 "moving": self.state == "MOVING", "settling": self.state == "SETTLING",
-                "listening": self.state == "LISTENING", "paused": self.state == "PAUSED",
+                "listening": self.state in {"LISTENING", "VERIFYING"},
+                "paused": self.state in {"PAUSED", "REVIEW"},
+                "audio_stop_enabled": self.audio_enabled,
+                "trigger": deepcopy(self._trigger), "verified_cue": deepcopy(self._verified_cue),
+                "fault": self._fault_reason,
                 "estopped": self.state == "ESTOP" or bool(getattr(self.rover, "estopped", False)),
                 "battery": self.battery, "done": self.done,
                 "interrupted_move": self._interrupted_move,
@@ -180,6 +320,9 @@ class Patrol:
         return {"ok": True, "patrol": self.snapshot()}
 
     def _emit_state(self, state):
+        if state != self.state:
+            self._phase_started = self.pipeline.t
+            self._knocks.clear()
         self.state = state
         self.pipeline.bus.publish("patrol", self.pipeline.t, **self.snapshot())
 
@@ -242,6 +385,7 @@ class Patrol:
         self._move_index = 0
         self._noisy = False
         self._interrupted_move = False
+        self._trigger = self._verified_cue = self._verification_error = None
         self._close_gate()
         self._emit_state("MOVING")
         self._next_move()
@@ -300,7 +444,10 @@ class Patrol:
         if completion == "reported":
             if ok is not True:
                 self._error("LED update failed")
-            self._next_gap()
+            if self.audio_enabled:
+                self._emit_state("REVIEW")
+            else:
+                self._next_gap()
         elif completion == "status":
             if isinstance(ok, dict):
                 self.battery = ok.get("batt", ok.get("battery"))
@@ -333,7 +480,9 @@ class Patrol:
             return
         if self._gate_started is not None:
             self.engine.gate_until(math.inf)
-        if self.state == "MOVING":
+        if self.state == "STOPPING" and t >= self._deadline:
+            self._audio_fault("STOP acknowledgement timed out; motion remains locked")
+        elif self.state == "MOVING":
             if self._dialog_busy():
                 self._error("active dialog during motion; emergency stop requested")
                 self._fail()
@@ -345,7 +494,15 @@ class Patrol:
                 self._completed(generation, completion, True)
         elif (self.state == "SETTLING" and t >= max(self._deadline, self._prompt_gate_until)
               and not self._dialog_busy()):
-            self._begin_listen()
+            if self.audio_enabled:
+                self._begin_verify()
+            else:
+                self._begin_listen()
+        elif self.state == "VERIFYING" and t >= self._deadline:
+            if self._verified_cue is not None:
+                self._begin_listen()
+            else:
+                self._gap_result(self.engine.snapshot(), "AUDIO_ERROR" if self._verification_error else "UNCONFIRMED")
         elif self.state == "LISTENING":
             snap = self.engine.snapshot()
             self._noisy = self._noisy or snap.get("noisy", False) or snap["state"] == "TOO_NOISY"
@@ -372,6 +529,13 @@ class Patrol:
                   "noisy": bool(self._noisy), "reason": reason,
                   "interrupted_move": self._interrupted_move,
                   "arrival_unverified": self._arrival_unverified}
+        if self.audio_enabled:
+            result.update(trigger=deepcopy(self._trigger), verified_cue=deepcopy(self._verified_cue),
+                          verification_error=self._verification_error)
+            if self._trigger or self._verified_cue:
+                # A missing answer never erases the initial possible-person cue.
+                if result["status"] != "CONFIRMED":
+                    result["status"] = "POSSIBLE"
         self.results.append(result)
         self.pipeline.bus.publish("gap_result", self.pipeline.t, **result)
         self._emit_state("REPORTING")
@@ -415,8 +579,10 @@ class Patrol:
         The emergency stop method bypasses the ordinary rover move worker.
         """
         name = str(name).lower()
+        if self._fault_reason and name in {"pause", "resume"}:
+            return {"ok": False, "error": "motion fault is latched; restart after checking the rover"}
         if name == "resume":
-            if self.done or self.state != "PAUSED" or getattr(self.rover, "estopped", False):
+            if self.done or self.state not in {"PAUSED", "REVIEW"} or getattr(self.rover, "estopped", False):
                 return {"ok": False, "error": "resume requires a paused patrol"}
             generation = self._generation
             self.pipeline.call_soon(lambda: self._resume(generation))
@@ -425,11 +591,14 @@ class Patrol:
             return {"ok": False, "error": "unknown patrol command"}
         generation = self._invalidate()
         ok = self._stop_now(name != "pause")
-        self.pipeline.call_soon(lambda: self._control(name, generation))
+        self.pipeline.call_soon(lambda: self._control(name, generation, ok))
         return {"ok": ok}
 
-    def _control(self, name, generation):
+    def _control(self, name, generation, stopped=True):
         if self.done or generation != self._generation:
+            return
+        if not stopped and name == "pause":
+            self._audio_fault("Pause STOP was not acknowledged; motion remains locked")
             return
         if name == "pause" and getattr(self.rover, "estopped", False):
             name = "estop"
@@ -448,11 +617,18 @@ class Patrol:
 
     def _resume(self, generation):
         with self._control_lock:
-            if (generation != self._generation or self.done or self.state != "PAUSED"
+            if (generation != self._generation or self.done or self.state not in {"PAUSED", "REVIEW"}
                     or getattr(self.rover, "estopped", False)):
                 return
+            reviewed = self.state == "REVIEW" or self._paused_phase == "REVIEW"
             self._halted = False
         self.pipeline.bus.publish("operator", self.pipeline.t, command="resume", source="patrol")
+        if reviewed:
+            # The result is tied to the actual stopped position. Never replay
+            # the remainder of an interrupted move with an unknown distance.
+            self._paused_phase = None
+            self._next_gap()
+            return
         if self.gap_index < 0:
             self._next_gap()
             return
@@ -526,6 +702,24 @@ def prepare_patrol_simulation(profile, route, *, bus=None, run_dir=None, argv=No
         bus=bus, run_dir=run_dir, argv=argv, rng_seed=seed, collect_events=True)
     rover = FakeRover(cfg=cfg, bus=runtime.bus, clock=lambda: runtime.pipeline.t)
     patrol = Patrol(rover, runtime.pipeline, runtime.session, runtime.session.prompter, route, cfg)
+    if cfg.get("sim_audio_cue", False):
+        injected = set()
+
+        def demo_audio(t):
+            # Explicit synthetic labels: exercise control flow without loading
+            # CLAP, opening a microphone, or pretending to measure accuracy.
+            phase = patrol.state
+            delay = cfg["sim_audio_cue_after_s"]
+            if phase == "VERIFYING":
+                delay = cfg["audio_stop"]["demo_window_s"]
+            if (phase in {"MOVING", "VERIFYING"} and phase not in injected
+                    and t >= patrol._phase_started + delay):
+                injected.add(phase)
+                runtime.bus.publish("audio_observation", t, start=patrol._phase_started,
+                                    label="SCREAM", score=1.0, possible_distress=True,
+                                    matched_phrases=[], transcript="", alert=True, simulated=True)
+
+        runtime.pipeline.on_block.append(demo_audio)
     runtime.on_close.extend([patrol.close, rover.close])
     patrol.start()
     return runtime, patrol
