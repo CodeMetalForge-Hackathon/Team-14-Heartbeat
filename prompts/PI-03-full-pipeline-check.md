@@ -10,3 +10,9 @@ Follow-up: user requested smooth movement without the routine stops every 3 cm.
 Implement continuous guarded forward travel with camera/API and audio checks
 while moving. Retain the existing total travel limit and meaningful stop causes.
 User asked to avoid excessive testing; focus checks on the changed movement path.
+
+Follow-up: after failed uploads, invalid serial replies and unexpected left-track
+movement, user requested: "can you push all the latest changes and errors that
+we're currently facing". Record observed failures, current deployment status,
+validation limits and unresolved questions, then commit and push. Do not restart
+hardware testing while preparing the record.

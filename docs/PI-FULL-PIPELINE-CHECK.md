@@ -1,5 +1,10 @@
 # Supervised 50 cm Decisions check
 
+**Current blocker:** unexpected track movement and unacknowledged serial STOP.
+Hardware testing is stopped. The commands below describe the earlier test setup;
+do not rerun the armed test while this fault remains unresolved. See the
+[current incident and error record](PI-ROVER-CURRENT-ISSUES.md).
+
 The operator requested tabletop testing with movement, camera/API decisions,
 knocks and other audio signals. `pi-full-check` enables knock and vocal monitoring,
 retains 35% drive power and the existing sensor/freshness/STOP guards, and caps
@@ -123,7 +128,9 @@ flash and 2,224 bytes of static RAM. The full suite was not repeated for this
 change, following the operator's request to keep testing focused.
 
 Installation is pending: USB upload timed out, and STOP/PING probes received
-corrupted serial data instead of rover acknowledgements. Reconnect the rover
-USB cable and reset the Auriga before retrying the upload. No live continuous
-movement has been validated. This update adds CRUISE/CAPS protocol support;
-it does not change the audio or deterministic dialog contracts.
+invalid serial data instead of rover acknowledgements. Reconnect/reset and
+power-cycle retries did not resolve it. Unexpected track movement was later
+reported, so further powered testing and connection retries are stopped pending
+hardware diagnosis. See [the current incident record](PI-ROVER-CURRENT-ISSUES.md).
+No live continuous movement has been validated. This update adds CRUISE/CAPS
+protocol support; it does not change the audio or deterministic dialog contracts.
