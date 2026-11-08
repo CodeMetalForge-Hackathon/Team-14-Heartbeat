@@ -1,0 +1,241 @@
+{
+  "recorded_at": "2026-11-08T13:13:55.674562+00:00",
+  "setting": {
+    "profile": "pi-explore",
+    "no_echo_camera_motion": true
+  },
+  "software_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "991",
+      "time": "165.080",
+      "timestamp": "2026-11-08T08:05:01.245353-05:00",
+      "hostname": "raspberrypi"
+    }
+  ],
+  "firmware_regression_checks": "Actual sketch compiled with fake Arduino IO; camera fallback, valid close obstacles, STOP, watchdog, stall, deadlines and strict defaults passed.",
+  "firmware_build": {
+    "target": "arduino:avr:mega:cpu=atmega2560",
+    "avr_core": "1.8.8",
+    "makeblock_commit": "21b20bb",
+    "library_setting": "dot_a_linkage=true",
+    "flash_bytes": 24870,
+    "ram_bytes": 1363,
+    "source_sha256": "766d8f20c1521dea4453ce3b9ba1a0da03ee0f00ea1c6ca0fbf58074f0e4815e",
+    "hex_sha256": "3192068240eca8305763d0d7c34cae92c760d07e23e944ae25955e7a80441774",
+    "backup": "runs/noecho-firmware-build/pre-update-flash.hex",
+    "upload": "avrdude -p atmega2560 -c wiring -P /dev/ttyUSB0 -b 115200 -D -U flash:w:runs/noecho-firmware-build/rover.ino.hex:i",
+    "verification": "24870 bytes of flash verified; runtime STOP, CAPS noecho=1 and NOECHO on/off acknowledged"
+  },
+  "hardware_policy_check": {
+    "motion_commands_sent": false,
+    "sensor_port": 10,
+    "stop_acknowledged": true,
+    "capabilities": {
+      "kind": "CAPS",
+      "guarded": true,
+      "raw": "CAPS guarded=1 cruise=1 noecho=1",
+      "cruise": true,
+      "noecho": true
+    },
+    "navigation_acknowledged": true,
+    "no_echo_enabled_acknowledged": true,
+    "range_after_enabling": {
+      "kind": "RANGE",
+      "port": 10,
+      "cm": 71.4,
+      "valid": true,
+      "raw": "RANGE port=10 cm=71.40 valid=1"
+    },
+    "status": {
+      "kind": "STATUS",
+      "batt": 7.35,
+      "moving": false,
+      "enc": [
+        0.0,
+        0.0
+      ],
+      "raw": "STATUS batt=7.35 moving=0 enc=0,0"
+    },
+    "no_echo_disabled_acknowledged": true,
+    "final_stop_acknowledged": true
+  },
+  "live_run": {
+    "path": "runs/camera-noecho-live-20261108-igEI54",
+    "recording_status": "snapshot of active recording",
+    "state": "REVIEW",
+    "reason": "Stopped: Guarded motion failed, expired, or was not acknowledged",
+    "commands": [
+      {
+        "t": 0.032,
+        "args": [
+          1.0
+        ],
+        "command": "NOECHO",
+        "kind": "command",
+        "line": "NOECHO 1",
+        "moving": false
+      },
+      {
+        "t": 4.8,
+        "args": [
+          20.0,
+          35.0,
+          15000.0
+        ],
+        "command": "CRUISE",
+        "kind": "command",
+        "line": "CRUISE 20 35 15000",
+        "moving": true
+      },
+      {
+        "t": 40.528,
+        "args": [
+          20.0,
+          35.0,
+          15000.0
+        ],
+        "command": "CRUISE",
+        "kind": "command",
+        "line": "CRUISE 20 35 15000",
+        "moving": true
+      }
+    ],
+    "navigation_first": {
+      "t": 4.896,
+      "cm": 71.0,
+      "kind": "NAV",
+      "raw": "NAV FORWARD 71.00",
+      "state": "FORWARD"
+    },
+    "navigation_last": {
+      "t": 6.56,
+      "cm": 65.12,
+      "kind": "NAV",
+      "raw": "NAV FORWARD 65.12",
+      "state": "FORWARD"
+    },
+    "stops": [
+      {
+        "t": 6.56,
+        "reason": "low_confidence",
+        "message": "Stopping: Movement confidence below threshold; checking the scene again"
+      },
+      {
+        "t": 11.6,
+        "reason": "debris_detected",
+        "message": "Stopping: Camera flagged possible debris; inspecting and listening"
+      },
+      {
+        "t": 38.096,
+        "reason": "operator_resume_observation",
+        "message": "Stopping: Operator resumed; checking camera and distance before exploring"
+      },
+      {
+        "t": 40.56,
+        "reason": "Guarded motion failed, expired, or was not acknowledged",
+        "message": "Stopping: Guarded motion failed, expired, or was not acknowledged"
+      }
+    ],
+    "encoder_statuses": [
+      {
+        "batt": 7.35,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.35 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.25,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.25 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.28,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.28 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.29,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.29 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.29,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.29 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.31,
+        "enc": [
+          0.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.31 moving=0 enc=0,0"
+      },
+      {
+        "batt": 7.08,
+        "enc": [
+          6.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.08 moving=0 enc=6,0"
+      },
+      {
+        "batt": 7.08,
+        "enc": [
+          6.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.08 moving=0 enc=6,0"
+      },
+      {
+        "batt": 7.08,
+        "enc": [
+          6.0,
+          0.0
+        ],
+        "kind": "STATUS",
+        "moving": false,
+        "raw": "STATUS batt=7.08 moving=0 enc=6,0"
+      }
+    ]
+  },
+  "limitations": [
+    "Live forward run had valid ultrasonic readings; missing-echo movement was exercised in host and actual-sketch regression tests.",
+    "Reserved distance is not calibrated completed travel.",
+    "Camera obstacle and debris recognition accuracy remains unvalidated."
+  ]
+}

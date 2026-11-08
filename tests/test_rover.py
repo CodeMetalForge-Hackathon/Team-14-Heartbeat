@@ -146,6 +146,74 @@ def test_old_firmware_cannot_receive_continuous_command(make_link):
     assert not any(line.startswith('CRUISE') for line in serial.writes)
 
 
+def test_no_echo_capabilities_and_policy_protocol(make_link):
+    caps = rover.parse_reply('CAPS guarded=1 cruise=1 noecho=1')
+    assert caps['guarded'] and caps['cruise'] and caps['noecho']
+    link, serial = make_link()
+    assert link.set_no_echo_motion(True)
+    assert link.set_no_echo_motion(False)
+    assert 'NOECHO 1' in serial.writes and 'NOECHO 0' in serial.writes
+    with pytest.raises(ValueError, match='boolean'):
+        link.set_no_echo_motion(1)
+
+
+@pytest.mark.parametrize('line', ['CAPS guarded=1 noecho=0',
+    'CAPS guarded=1 noecho=1 noecho=1', 'OK NOECHO 2', 'OK NOECHO 0.5',
+    'NAV NO_ECHO 30', 'NAV NO_ECHO nan'])
+def test_no_echo_protocol_rejects_malformed_policy_and_telemetry(line):
+    with pytest.raises(ValueError):
+        rover.parse_reply(line)
+
+
+def test_cruise_stream_preserves_missing_echo_as_invalid(make_link):
+    class NoEchoSerial(Serial):
+        def write(self, payload):
+            line = payload.decode().strip()
+            if line == 'CAPS' or line.startswith('CRUISE '):
+                with self.condition:
+                    self.writes.append(line)
+                    self.condition.notify_all()
+                self.push('CAPS guarded=1 cruise=1 noecho=1' if line == 'CAPS' else 'NAV NO_ECHO -1.00')
+                return len(payload)
+            return super().write(payload)
+    link, serial = make_link(NoEchoSerial())
+    worker = threading.Thread(target=lambda: link.cruise(20, 35, 15000))
+    worker.start()
+    assert serial.wait_command('CRUISE 20 35 15000')
+    deadline = time.monotonic() + 1
+    while link.cruise_observation() is None and time.monotonic() < deadline:
+        time.sleep(.001)
+    reading = link.cruise_observation()
+    assert reading['valid'] is False and reading['cm'] == -1 and reading['moving'] is True
+    link.stop()
+    worker.join(1)
+    assert not worker.is_alive() and not link.moving
+
+
+def test_close_approach_command_preserves_arguments_and_checks_capability(make_link):
+    class ApproachSerial(Serial):
+        def write(self, payload):
+            if payload == b'CAPS\n':
+                with self.condition:
+                    self.writes.append('CAPS')
+                    self.condition.notify_all()
+                self.push('CAPS guarded=1 cruise=1 noecho=1 approach=1')
+                return len(payload)
+            return super().write(payload)
+    link, serial = make_link(ApproachSerial())
+    assert link.approach(2, 35, 1000, 3)
+    assert 'APPROACH 2 35 1000 3' in serial.writes
+    assert rover.parse_reply('OK APPROACH 2 35 1000 3')['args'] == [2, 35, 1000, 3]
+
+
+@pytest.mark.parametrize('line', ['OK APPROACH 6 35 1000 3', 'OK APPROACH 2 36 1000 3',
+    'OK APPROACH 2 35 2001 3', 'OK APPROACH 2 35 1000 2', 'OK APPROACH -2 35 1000 3',
+    'OK APPROACH 2 35 1000', 'CAPS guarded=1 approach=0'])
+def test_close_approach_protocol_rejects_unsafe_or_incomplete_values(line):
+    with pytest.raises(ValueError):
+        rover.parse_reply(line)
+
+
 @pytest.mark.parametrize("line", ["", "   ", "PONG knocker v1", "READY stickmic v1", "OK", "OK DRIVE nan",
     "OK TURN inf", "OK STOP 1", "OK LED 256 0 0", "OK LED 1.5 0 0", "OK CAL 18",
     "STATUS batt=nan moving=0 enc=1,2", "STATUS batt=12 moving=2 enc=1,2",

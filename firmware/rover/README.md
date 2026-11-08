@@ -28,6 +28,13 @@ the Git install, download the repository's ZIP from its Code menu, then use
 Remove conflicting older Makeblock copies if the compiler reports ambiguous
 symbols. The `library.enable_unsafe_install` switch is needed for Git/ZIP installs.
 
+If the installed Makeblock library reports duplicate `mePort` or `encoder_Port`
+definitions from `MeMegaPi.cpp`, add `dot_a_linkage=true` to that library's
+`library.properties` file. Arduino's [archive linking setting](https://docs.arduino.cc/arduino-cli/library-specification/)
+lets the linker select the required objects and retain the sketch's Auriga
+pin map. The isolated Pi build in `runs/noecho-firmware-toolchain` uses this
+setting with Makeblock commit `21b20bb` and AVR core 1.8.8.
+
 Use the actual port shown by `board list`; a Pi usually uses `/dev/ttyUSB0` or
 `/dev/ttyACM0`. Uploading or opening USB serial may reset the Auriga. The sketch
 boots with motor output zero, the ring off, and exactly `READY rover v1`.
@@ -65,8 +72,11 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 | --- | --- |
 | boot | `READY rover v1` |
 | `PING` | `PONG rover v1` |
+| `CAPS` | `CAPS guarded=1 cruise=1 noecho=1 approach=1`; supported guarded features |
 | `RANGE <port>` | `RANGE port=<port> cm=<distance> valid=<0/1>`; stationary only |
 | `NAVCFG <port> <stop_cm> <clear_cm> <step_cm> <turn_deg> <max_turns> <poll_ms> <settle_ms> <turn_clearance_cm> <range_retry_ms> <range_good_reads>` | `OK NAVCFG ...`; validated settings, stationary only, RAM only |
+| `NOECHO <0\|1>` | `OK NOECHO ...`; opt in to camera-directed guarded motion on missing echoes, after NAVCFG and while stopped |
+| `APPROACH <cm> <speed_pct> <max_ms> <stop_cm>` | `OK APPROACH ...`; short guarded debris approach, completing at the encoder target or close range target |
 | `EXPLORE <seconds> <speed_pct>` | `OK EXPLORE <seconds>` only when the bounded period ends; STOP cancels it |
 | `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached within tolerance; negative distance reverses |
 | `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached within tolerance; in-place turn |
@@ -81,6 +91,28 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 acknowledgement. A canceled move never produces a later `OK DRIVE` or `OK TURN`.
 `STOP` is parsed before the next motion update, including when a move would
 otherwise finish on that same iteration. It bypasses normal speed ramping.
+
+`NOECHO 1` applies only to host-directed STEP, PIVOT and CRUISE commands. Unknown
+echoes then defer the movement decision to the host camera policy; valid close
+readings still stop or reject motion. Continuous no-echo travel streams
+`NAV NO_ECHO -1.00`, retaining an explicitly unknown distance. Watchdog, encoder,
+stall, action duration and STOP guards still apply. The default is `NOECHO 0`,
+and every successful NAVCFG and boot restores that default. MCU-only EXPLORE
+retains its existing stopped no-echo retry behavior. Use matching host and MCU
+versions: the host refuses to arm this mode without `CAPS noecho=1`.
+
+APPROACH is a separate close-positioning primitive: forward distance at most
+5 cm, power at most 35%, duration at most 2000 ms, and stopping gap 3–15 cm.
+It samples usable front range before and during travel and requires NAVCFG.
+The normal 30 cm cutoff does not apply to APPROACH; its own target does. A
+missing echo aborts it even with NOECHO enabled. Reaching the measured gap stops
+both motors immediately and acknowledges the exact accepted arguments. A
+completed encoder step alone does not prove arrival: the host must obtain a
+fresh image and close reading before listening. STOP, watchdog, stall, encoder
+direction and action deadlines still apply. There is no bumper/contact input.
+The new host checks `approach=1` before arming close-debris mode; update matching
+host and firmware together. This close-approach revision was built and checked
+without hardware; it has not been uploaded to the disconnected rover.
 
 While moving, `HB`, `PING`, `STATUS`, and `STOP` are supported. Another motion,
 `CAL`, or `LED` returns `ERR busy` and stops the current movement. Requiring the

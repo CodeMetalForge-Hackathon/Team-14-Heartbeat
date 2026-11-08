@@ -93,7 +93,7 @@ void command(const char *value){
 }
 void off(){assert(!moving && !exploring && leftMotor.pwm==0 && rightMotor.pwm==0);}
 void reset(){
- stopMotors();navigationConfigured=false;testMillis=10000;testEcho=5800;testPulseDelayMs=0;
+ stopMotors();navigationConfigured=false;guardedNoEcho=false;testMillis=10000;testEcho=5800;testPulseDelayMs=0;
  leftMotor.position=rightMotor.position=0;navigationTurns=0;Serial.clear();
 }
 void configure(){command("NAVCFG 10 30 45 20 45 8 80 200 15 800 2");assert(navigationConfigured);}
@@ -107,6 +107,69 @@ void completeSegment(){
 int main(){
  for(int p=0;p<17;p++)mePort[p].s2=100+p;
  setup();
+ // Close approach is bounded and uses its own target below normal clearance.
+ reset();configure();testEcho=10*58;command("APPROACH 2 35 1000 3");
+ assert(moving && guardedApproach);testEcho=6*58;tick(80);assert(moving);
+ testEcho=3*58;tick(80);off();
+ assert(Serial.out.str().find("OK APPROACH 2 35 1000 3")!=std::string::npos);
+ // Arrival already at the target acknowledges without powering motors.
+ reset();configure();testEcho=3*58;command("APPROACH 2 35 1000 3");off();
+ assert(Serial.out.str().find("OK APPROACH 2 35 1000 3")!=std::string::npos);
+ // Reaching a step's encoder distance is an approach ACK, not ordinary STEP.
+ reset();configure();command("APPROACH 2 35 1000 3");
+ leftMotor.position=startLeft+targetPulses*leftDirection;
+ rightMotor.position=startRight+targetPulses*rightDirection;tick(20);off();
+ assert(Serial.out.str().find("OK APPROACH 2 35 1000 3")!=std::string::npos);
+ // Missing echoes can never count as close arrival, even with NOECHO enabled.
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("APPROACH 2 35 1000 3");off();
+ assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ reset();configure();command("NOECHO 1");command("APPROACH 2 35 1000 3");
+ testEcho=0;tick(80);off();assert(Serial.out.str().find("ERR range_unknown")!=std::string::npos);
+ // Close approach keeps independent STOP, watchdog and action deadlines.
+ reset();configure();command("APPROACH 2 35 1000 3");command("STOP");off();
+ reset();configure();command("APPROACH 2 35 2000 3");testMillis+=1500;loop();off();
+ assert(Serial.out.str().find("ERR watchdog")!=std::string::npos);
+ reset();configure();command("APPROACH 2 35 1000 3");tick(1000);off();
+ assert(Serial.out.str().find("ERR guard_timeout")!=std::string::npos);
+ reset();configure();command("APPROACH 2 35 2000 3");tick(1500);off();
+ assert(Serial.out.str().find("ERR stall")!=std::string::npos);
+ // Invalid approach distances, powers and targets are rejected stopped.
+ for(const char *bad:{"APPROACH 6 35 1000 3","APPROACH 2 36 1000 3", "APPROACH 2 35 1000 2"}){
+   reset();configure();command(bad);off();assert(Serial.out.str().find("ERR limit")!=std::string::npos);
+ }
+ // The camera no-echo policy is explicit, guarded-only, and reset by NAVCFG.
+ reset();command("NOECHO 1");off();assert(!guardedNoEcho);
+ reset();configure();command("NOECHO 2");off();assert(!guardedNoEcho);
+ reset();configure();command("NOECHO 1");assert(guardedNoEcho);
+ configure();assert(!guardedNoEcho);
+ // Missing echoes can start and sustain a bounded camera-directed cruise.
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("CRUISE 20 35 15000");assert(moving && continuousMove);tick(80);assert(moving);
+ assert(Serial.out.str().find("NAV NO_ECHO -1.00")!=std::string::npos);
+ testEcho=20*58;tick(80);off();
+ assert(Serial.out.str().find("ERR obstacle_too_close")!=std::string::npos);
+ // Valid close echoes refuse starting even while fallback is selected.
+ reset();configure();command("NOECHO 1");testEcho=10*58;
+ command("STEP 3 35 1000");off();
+ assert(Serial.out.str().find("ERR obstacle_too_close")!=std::string::npos);
+ // Missing-echo turns are still bounded and STOP remains independent.
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("PIVOT 10 35 1000");assert(moving);tick(80);assert(moving);
+ command("STOP");off();
+ // Watchdog, action deadline and stalls still stop no-echo cruises.
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("CRUISE 20 35 15000");testMillis+=1500;loop();off();
+ assert(Serial.out.str().find("ERR watchdog")!=std::string::npos);
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("CRUISE 20 35 100");tick(100);off();
+ assert(Serial.out.str().find("ERR guard_timeout")!=std::string::npos);
+ reset();configure();command("NOECHO 1");testEcho=0;
+ command("CRUISE 20 35 15000");tick(1500);off();
+ assert(Serial.out.str().find("ERR stall")!=std::string::npos);
+ // Autonomous MCU exploration keeps its original stopped echo-retry behavior.
+ reset();configure();command("NOECHO 1");command("EXPLORE 120 30");testEcho=0;tick(200);
+ assert(!moving && exploring && navigationPhase==NAV_RETRY);command("STOP");off();
  // Continuous guarded travel crosses 3 cm without stopping; only final target stops.
  reset();configure();command("CRUISE 50 35 15000");assert(moving && continuousMove);
  tick(20);int cruiseZeroLeft=leftMotor.zeroWrites,cruiseZeroRight=rightMotor.zeroWrites;

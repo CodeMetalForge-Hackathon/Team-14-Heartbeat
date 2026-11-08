@@ -47,17 +47,37 @@ def validate_decision_settings(settings):
     cfg = deepcopy(dict(settings))
     cfg.setdefault("continuous_forward", False)
     cfg.setdefault("autonomous_exploration", False)
+    cfg.setdefault("no_echo_camera_motion", False)
     cfg.setdefault("inspection_trigger", "audio_and_vision")
     cfg.setdefault("stop_image_history_size", cfg.get("history_size"))
     if not isinstance(cfg["continuous_forward"], bool):
         raise ValueError("rover.decisions.continuous_forward must be boolean")
     if not isinstance(cfg["autonomous_exploration"], bool):
         raise ValueError("rover.decisions.autonomous_exploration must be boolean")
+    if not isinstance(cfg["no_echo_camera_motion"], bool):
+        raise ValueError("rover.decisions.no_echo_camera_motion must be boolean")
+    if cfg["no_echo_camera_motion"] and not cfg["autonomous_exploration"]:
+        raise ValueError("no_echo_camera_motion requires autonomous_exploration")
     if (not isinstance(cfg["inspection_trigger"], str)
             or cfg["inspection_trigger"] not in {"audio_and_vision", "debris_only"}):
         raise ValueError("inspection_trigger must be audio_and_vision or debris_only")
     if cfg["inspection_trigger"] == "debris_only" and not cfg["autonomous_exploration"]:
         raise ValueError("debris_only requires autonomous_exploration")
+    approach = cfg.setdefault("debris_approach", {"enabled": False})
+    if not isinstance(approach, Mapping) or not isinstance(approach.get("enabled"), bool):
+        raise ValueError("debris_approach.enabled must be boolean")
+    if approach["enabled"]:
+        if not cfg["autonomous_exploration"] or cfg["inspection_trigger"] != "debris_only":
+            raise ValueError("debris_approach requires autonomous exploration and debris_only inspections")
+        for key in ("stop_cm", "step_cm", "speed_pct", "max_ms", "arrival_tolerance_cm"):
+            if key not in approach:
+                raise ValueError(f"Missing debris_approach.{key}")
+            _number(approach[key], f"debris_approach.{key}")
+        if (not 3 <= approach["stop_cm"] <= 15 or not 0 < approach["step_cm"] <= 5
+                or not 1 <= approach["speed_pct"] <= 35
+                or not 0 < approach["arrival_tolerance_cm"] <= 1
+                or not isinstance(approach["max_ms"], int) or not 1 <= approach["max_ms"] <= 2000):
+            raise ValueError("debris_approach exceeds guarded approach limits")
     positive = ("session_s", "observation_max_age_s", "decision_interval_s", "hold_s",
                 "forward_cm", "turn_deg", "speed_pct", "worker_join_s")
     try:
@@ -154,6 +174,7 @@ class DecisionsPatrol(Patrol):
         self._stop_images = deque(maxlen=decisions["stop_image_history_size"])
         self._image_stop_reason = None
         self._last_front_cm = None
+        self._last_no_echo = False
         self._last_action = None
         self._confidence = None
         self._latency = None
@@ -174,6 +195,7 @@ class DecisionsPatrol(Patrol):
         self._last_stop_reason = None
         self._last_stop_message = None
         self._debris_inspection_active = False
+        self._debris_approaching = False
         super().__init__(rover, pipeline, engine, prompter,
                          [{"name": "Decision search 1", "moves": []}], cfg)
         self._observation_thread = threading.Thread(
@@ -193,6 +215,11 @@ class DecisionsPatrol(Patrol):
             "forward_budget_cm": self.decision_cfg.get("forward_budget_cm"),
             "autonomous_exploration": self.decision_cfg["autonomous_exploration"],
             "range_valid": _finite_number(self._last_front_cm) and 2 <= self._last_front_cm <= 400,
+            "no_echo_camera_motion": self.decision_cfg["no_echo_camera_motion"],
+            "camera_only_motion": self.decision_cfg["no_echo_camera_motion"] and self._last_no_echo,
+            "debris_approach_enabled": self.decision_cfg["debris_approach"]["enabled"],
+            "approaching_debris": self._debris_approaching,
+            "debris_stop_cm": self.decision_cfg["debris_approach"].get("stop_cm"),
             "status_message": self._status_message(),
             "stop_reason": self._last_stop_reason,
             "stop_message": self._last_stop_message,
@@ -223,7 +250,7 @@ class DecisionsPatrol(Patrol):
         metadata = {
             "id": image_id, "stop_t": float(self.pipeline.t), "reason": reason,
             "message": self._reason_message(reason),
-            "kind": "possible_debris" if reason == "debris_detected" else "scene",
+            "kind": "possible_debris" if reason in {"debris_detected", "debris_arrived"} else "scene",
             "image_url": f"/api/stop-images/{image_id}" if jpeg is not None else None,
             "frame_sequence": sequence,
             "frame_age_s": None if captured is None else max(0.0, monotonic() - captured),
@@ -238,12 +265,17 @@ class DecisionsPatrol(Patrol):
                     "Possible distress sound detected; investigating")
         return {
             "debris_detected": "Camera flagged possible debris; inspecting and listening",
+            "debris_arrived": "Close debris target reached; stopping to inspect and listen",
+            "debris_not_close": "Debris is not yet at the close target; continuing camera checks",
+            "debris_range_unknown": "Close debris approach paused; waiting for a usable distance",
+            "approach_requires_fresh_observation": "Debris spotted; stopping cruise to check a close approach",
             "decisions_stop_and_listen": "Camera requested an inspection; listening for a response",
             "model_hold": "Camera requested HOLD; checking the scene again",
             "low_confidence": "Movement confidence below threshold; checking the scene again",
             "obstacle_recheck": "Obstacle detected; looking for another route",
             "turn_requires_fresh_observation": "Changing direction; checking the turn before moving",
             "range_recheck": "Distance reading unavailable; retrying the sensor",
+            "navigation_recheck": "Rover reconnected; restoring navigation before exploring",
             "waiting_for_range": "Distance reading unavailable; retrying the sensor",
             "low_battery": "Reported battery voltage below the configured minimum",
             "battery_unavailable": "Battery reading unavailable",
@@ -269,7 +301,11 @@ class DecisionsPatrol(Patrol):
             return "Stopped: " + self._reason_message("operator_pause")
         if self.state == "MOVING":
             if self._cruise_active:
-                return "Exploring forward"
+                return ("Exploring forward using camera; ultrasonic has no echo" if
+                        self.decision_cfg["no_echo_camera_motion"] and self._last_no_echo else "Exploring forward")
+            if self._last_action == "APPROACH_DEBRIS":
+                target = self.decision_cfg["debris_approach"]["stop_cm"]
+                return f"Approaching debris; target gap {target:g} cm"
             return {"TURN_LEFT_SHORT": "Turning left to explore another direction",
                     "TURN_RIGHT_SHORT": "Turning right to explore another direction"}.get(
                         self._last_action, "Exploring forward")
@@ -323,12 +359,19 @@ class DecisionsPatrol(Patrol):
         action, front = intent["action"], intent["front_cm"]
         if not self._battery_ready():
             return False
-        if not _finite_number(front) or not 2 <= front <= 400:
+        if action == "APPROACH_DEBRIS":
+            approach = self.decision_cfg["debris_approach"]
+            return (approach["enabled"] and _finite_number(front)
+                    and approach["stop_cm"] + approach["arrival_tolerance_cm"] < front <= 400
+                    and not intent.get("no_echo"))
+        no_echo = (self.decision_cfg["no_echo_camera_motion"] and front is None
+                   and intent.get("no_echo") is True)
+        if not no_echo and (not _finite_number(front) or not 2 <= front <= 400):
             return False
         if action == "FORWARD_SHORT":
-            return front >= self.cfg["navigation"]["clear_cm"]
+            return no_echo or front >= self.cfg["navigation"]["clear_cm"]
         return (action in {"TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"} and self.allow_turns
-                and front >= self.cfg["navigation"]["turn_clearance_cm"])
+                and (no_echo or front >= self.cfg["navigation"]["turn_clearance_cm"]))
 
     def _cancel_observation(self):
         pending = self._pending_observation
@@ -351,6 +394,7 @@ class DecisionsPatrol(Patrol):
 
     def _new_search_gap(self):
         self._debris_inspection_active = False
+        self._debris_approaching = False
         if self.gap_index >= 0:
             self.route.append({"name": f"Decision search {len(self.route) + 1}", "moves": []})
         self.gap_index += 1
@@ -396,16 +440,31 @@ class DecisionsPatrol(Patrol):
         voltage = self.battery if voltage is None else voltage
         return minimum is None or (_finite_number(voltage) and voltage >= minimum)
 
+    def _debris_arrived(self, front_cm):
+        approach = self.decision_cfg["debris_approach"]
+        return (approach["enabled"] and _finite_number(front_cm)
+                and 2 <= front_cm <= approach["stop_cm"] + approach["arrival_tolerance_cm"])
+
     def _allowed_actions(self, front_cm, battery=None):
         choices = (["HOLD"] if self.decision_cfg["inspection_trigger"] == "debris_only"
                    else list(STATIONARY_ACTIONS))
-        if self.decision_cfg["autonomous_exploration"]:
+        approach = self.decision_cfg["debris_approach"]
+        valid_range = _finite_number(front_cm) and 2 <= front_cm <= 400
+        if self.decision_cfg["autonomous_exploration"] and (
+                not approach["enabled"] or self._debris_arrived(front_cm)):
             choices.append("INSPECT_DEBRIS")
-        if not _finite_number(front_cm) or not 2 <= front_cm <= 400 or not self._battery_ready(battery):
+        no_echo = self.decision_cfg["no_echo_camera_motion"] and front_cm is None
+        if not self._battery_ready(battery) or (not no_echo and
+                (not _finite_number(front_cm) or not 2 <= front_cm <= 400)):
             return choices
-        if front_cm >= self.cfg["navigation"]["clear_cm"] and (self._forward_remaining() > 0 or self._cruise_active):
+        if approach["enabled"] and self._debris_approaching and not valid_range:
+            return choices
+        if (approach["enabled"] and valid_range and not self._debris_arrived(front_cm)
+                and self._forward_remaining() > 0):
+            choices.append("APPROACH_DEBRIS")
+        if (no_echo or front_cm >= self.cfg["navigation"]["clear_cm"]) and (self._forward_remaining() > 0 or self._cruise_active):
             choices.append("FORWARD_SHORT")
-        if self.allow_turns and front_cm >= self.cfg["navigation"]["turn_clearance_cm"]:
+        if self.allow_turns and (no_echo or front_cm >= self.cfg["navigation"]["turn_clearance_cm"]):
             choices.extend(("TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"))
         return choices
 
@@ -414,7 +473,7 @@ class DecisionsPatrol(Patrol):
         return math.inf if budget is None else max(0.0, budget - self._forward_commanded_cm)
 
     def _submit(self, method, args, completion=None):
-        if method in {"step", "cruise"}:
+        if method in {"step", "cruise", "approach"}:
             distance = min(args[0], self._forward_remaining())
             if distance <= 0:
                 self._request_navigation_stop("budget", "forward_budget_exhausted")
@@ -437,10 +496,20 @@ class DecisionsPatrol(Patrol):
             raise _ObservationError("Firmware does not support guarded STEP/PIVOT")
         if self.decision_cfg["continuous_forward"] and capabilities.get("cruise") is not True:
             raise _ObservationError("Continuous mode requires updated CRUISE firmware")
+        if self.armed and self.decision_cfg["no_echo_camera_motion"] and capabilities.get("noecho") is not True:
+            raise _ObservationError("Camera motion without echoes requires updated NOECHO firmware")
+        if (self.armed and self.decision_cfg["debris_approach"]["enabled"]
+                and capabilities.get("approach") is not True):
+            raise _ObservationError("Close debris approach requires updated APPROACH firmware")
         if pending["cancel"].is_set():
             return None
         if self.rover.configure_navigation(self.cfg["navigation"]) is not True:
             raise _ObservationError("Navigation configuration was not acknowledged")
+        if self.armed and self.decision_cfg["no_echo_camera_motion"]:
+            if pending["cancel"].is_set():
+                return None
+            if self.rover.set_no_echo_motion(True) is not True:
+                raise _ObservationError("Camera no-echo policy was not acknowledged")
         return {"prepared": True}
 
     def _observe(self, pending):
@@ -483,12 +552,13 @@ class DecisionsPatrol(Patrol):
         range_valid = (isinstance(reading, Mapping) and reading.get("valid") is True
                        and _finite_number(reading.get("cm")) and 2 <= reading["cm"] <= 400)
         # An explicit no-echo reply is still a healthy serial transaction.
-        # Exploration can inspect the image and retry while stopped, but no
-        # movement choice is offered until a fresh distance becomes valid.
+        # Only an explicit missing echo may use camera fallback. Silence,
+        # malformed replies and stale telemetry remain observation failures.
         no_echo = (isinstance(reading, Mapping) and reading.get("valid") is False
                    and reading.get("cm") == -1)
         if not range_valid and not (self.decision_cfg["autonomous_exploration"]
-                                    and no_echo and not self._cruise_active):
+                                    and no_echo and (not self._cruise_active
+                                        or self.decision_cfg["no_echo_camera_motion"])):
             raise _ObservationError("Front range is invalid or unavailable")
         if pending["cancel"].is_set():
             return None
@@ -496,9 +566,15 @@ class DecisionsPatrol(Patrol):
             raise _ObservationError("Stopped rover status could not be verified")
         front = float(reading["cm"]) if range_valid else None
         telemetry = {"front_cm": front, "range_valid": range_valid,
+                     "no_echo": no_echo,
+                     "no_echo_camera_motion": self.decision_cfg["no_echo_camera_motion"],
                      "moving": self._cruise_active, "armed": self.armed,
                      "autonomous_exploration": self.decision_cfg["autonomous_exploration"],
                      "inspection_trigger": self.decision_cfg["inspection_trigger"],
+                     "debris_approach_enabled": self.decision_cfg["debris_approach"]["enabled"],
+                     "approaching_debris": self._debris_approaching,
+                     "debris_stop_cm": self.decision_cfg["debris_approach"].get("stop_cm"),
+                     "debris_arrival_tolerance_cm": self.decision_cfg["debris_approach"].get("arrival_tolerance_cm"),
                      "continuous_forward": self.decision_cfg["continuous_forward"],
                      "continuous_target_in_progress": self._cruise_active,
                      "allow_turns": self.allow_turns, "steps": self._steps,
@@ -560,6 +636,7 @@ class DecisionsPatrol(Patrol):
         self._last_frame = (captured, sequence, jpeg)
         pending["deadline"] = min(pending["deadline"], captured + self.decision_cfg["observation_max_age_s"])
         self._last_front_cm = telemetry["front_cm"]
+        self._last_no_echo = telemetry["no_echo"]
         if "battery" in telemetry:
             self.battery = telemetry["battery"]
         self._decision_reason = "awaiting_decision"
@@ -620,23 +697,35 @@ class DecisionsPatrol(Patrol):
         elif confidence < self.decision_cfg["min_confidence"]:
             self._hold("low_confidence", pending["after"])
         elif action in {"STOP_AND_LISTEN", "INSPECT_DEBRIS"}:
+            approach = self.decision_cfg["debris_approach"]
+            if approach["enabled"] and not (
+                    value["telemetry"]["range_valid"] is True
+                    and self._debris_arrived(value["telemetry"]["front_cm"])):
+                self._hold("debris_not_close", pending["after"])
+                return
             self._debris_inspection_active = action == "INSPECT_DEBRIS"
+            self._debris_approaching = False
             self._record_outcome("stop_and_listen")
             self._verification_for_resume = False
-            self._request_navigation_stop("investigate", "debris_detected" if
-                                          action == "INSPECT_DEBRIS" else "decisions_stop_and_listen")
+            self._request_navigation_stop("investigate", "debris_arrived" if approach["enabled"] else
+                                          "debris_detected" if action == "INSPECT_DEBRIS" else "decisions_stop_and_listen")
         elif not self.armed:
             self._hold("motion_disarmed", pending["after"])
         elif self._budget_due():
             self._request_navigation_stop("budget", "session_budget_expired")
-        elif self._cruise_active and action in {"TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"}:
+        elif self._cruise_active and action in {"TURN_LEFT_SHORT", "TURN_RIGHT_SHORT", "APPROACH_DEBRIS"}:
+            if action == "APPROACH_DEBRIS":
+                self._debris_approaching = True
             # Stop first and discard this proposal. Turning requires another
             # camera/range observation after STOP is acknowledged.
             self._record_outcome("turn_requires_stop")
-            self._request_navigation_stop("hold", "turn_requires_fresh_observation")
+            self._request_navigation_stop("hold", "approach_requires_fresh_observation" if
+                                          action == "APPROACH_DEBRIS" else "turn_requires_fresh_observation")
         else:
+            self._debris_approaching = action == "APPROACH_DEBRIS"
             self._motion_intent = {"action": action, "observed": value["observed"],
                                    "front_cm": value["telemetry"]["front_cm"],
+                                   "no_echo": value["telemetry"]["no_echo"],
                                    "generation": self._generation}
             if self._cruise_active:
                 self._record_outcome("continued")
@@ -651,7 +740,12 @@ class DecisionsPatrol(Patrol):
                 self._review_failure("Movement gate rejected the current observation")
                 return
             speed, max_ms = self.decision_cfg["speed_pct"], self.decision_cfg["max_action_ms"]
-            if action == "FORWARD_SHORT":
+            if action == "APPROACH_DEBRIS":
+                approach = self.decision_cfg["debris_approach"]
+                distance = min(approach["step_cm"], value["telemetry"]["front_cm"] - approach["stop_cm"])
+                self._submit("approach", (distance, approach["speed_pct"],
+                             approach["max_ms"], approach["stop_cm"]), "decision_moved")
+            elif action == "FORWARD_SHORT":
                 if self.decision_cfg["continuous_forward"]:
                     self._cruise_active = True
                     self._next_observation_at = monotonic() + self.decision_cfg["decision_interval_s"]
@@ -677,8 +771,10 @@ class DecisionsPatrol(Patrol):
         self._record_outcome(reason)
         if reason == "model_hold" and not self._battery_ready():
             self._decision_reason = "low_battery" if _finite_number(self.battery) else "battery_unavailable"
+        elif reason == "model_hold" and self._debris_approaching and self._last_front_cm is None:
+            self._decision_reason = "debris_range_unknown"
         elif (reason == "model_hold" and self.decision_cfg["autonomous_exploration"]
-                and self._last_front_cm is None):
+                and self._last_front_cm is None and not self.decision_cfg["no_echo_camera_motion"]):
             self._decision_reason = "waiting_for_range"
         else:
             self._decision_reason = reason
@@ -697,11 +793,11 @@ class DecisionsPatrol(Patrol):
             generation, method, args, completion = job
             if generation != self._generation or self._closed:
                 continue
-            if method in {"drive", "turn", "explore", "step", "pivot", "cruise"} and not self.motion_allowed:
+            if method in {"drive", "turn", "explore", "step", "pivot", "cruise", "approach"} and not self.motion_allowed:
                 ok = False
             else:
                 try:
-                    if method in {"step", "pivot", "cruise"}:
+                    if method in {"step", "pivot", "cruise", "approach"}:
                         self._last_motion_error = None
                     ok = getattr(self.rover, method)(*args)
                 except Exception:
@@ -718,13 +814,16 @@ class DecisionsPatrol(Patrol):
             self._motion_intent = None
             if ok is not True:
                 if (self.decision_cfg["autonomous_exploration"]
-                        and self._last_motion_error in {"obstacle_too_close", "range_unknown"}):
+                        and self._last_motion_error in {"obstacle_too_close", "range_unknown", "navigation_not_configured"}):
                     self._record_outcome(self._last_motion_error)
                     # RoverLink retires the connection after a firmware ERR.
                     # Reopening can reset the MCU, losing its RAM-only NAVCFG.
                     self._navigation_ready = False
-                    self._request_navigation_stop("hold", "obstacle_recheck" if
-                        self._last_motion_error == "obstacle_too_close" else "range_recheck")
+                    self._request_navigation_stop("hold", {
+                        "obstacle_too_close": "obstacle_recheck",
+                        "range_unknown": "range_recheck",
+                        "navigation_not_configured": "navigation_recheck",
+                    }[self._last_motion_error])
                     return
                 self._record_outcome("failed")
                 self._review_failure("Guarded motion failed, expired, or was not acknowledged")
@@ -747,7 +846,7 @@ class DecisionsPatrol(Patrol):
 
     def _event(self, event):
         if (event.type == "error" and event.data.get("source") == "rover"
-                and event.data.get("command") in {"STEP", "PIVOT", "CRUISE"}):
+                and event.data.get("command") in {"STEP", "PIVOT", "CRUISE", "APPROACH"}):
             self._last_motion_error = event.data.get("message")
         super()._event(event)
         if self.done or self._halted:
@@ -796,6 +895,10 @@ class DecisionsPatrol(Patrol):
             self._halted = True
             self._generation += 1
             generation = self._generation
+        if was_moving:
+            # Interrupting an untagged move retires its serial connection.
+            # Reopening may reset the MCU and erase NAVCFG/NOECHO in RAM.
+            self._navigation_ready = False
         self._cancel_observation()
         self._cruise_active = False
         if was_moving and self._history and self._history[-1]["outcome"] == "dispatched":
@@ -919,6 +1022,7 @@ class DecisionsPatrol(Patrol):
         self.pipeline.bus.publish("operator", self.pipeline.t, command="resume", source="patrol")
         if self.decision_cfg["inspection_trigger"] == "debris_only":
             self._debris_inspection_active = False
+            self._debris_approaching = False
             self._engine_command("reset")
             self._verification_for_resume = False
             self._request_navigation_stop("hold", "operator_resume_observation", expected_generation=generation)
@@ -927,6 +1031,8 @@ class DecisionsPatrol(Patrol):
         self._request_navigation_stop("resume", "operator_resume_verification", expected_generation=generation)
 
     def _control(self, name, generation, stopped=True):
+        if generation == self._generation and self.state == "MOVING":
+            self._navigation_ready = False
         if (generation == self._generation and self.state == "MOVING" and self._history
                 and self._history[-1]["outcome"] == "dispatched"):
             self._record_outcome("interrupted")

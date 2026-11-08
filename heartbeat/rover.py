@@ -21,7 +21,7 @@ from .stickmic import canonical_port, claim_port, new_serial_connection, release
 MAX_REPLY_BYTES = 256  # Fixed framing bound, not a motion tuning parameter.
 MAX_GUARDED_MS = 2000  # Controller protocol ceiling, not a route tuning value.
 MAX_CRUISE_MS = 30000  # Separate continuous-command protocol ceiling.
-GUARDED_COMMANDS = {"STEP", "PIVOT", "CRUISE"}
+GUARDED_COMMANDS = {"STEP", "PIVOT", "CRUISE", "APPROACH"}
 MOTION_COMMANDS = {"DRIVE", "TURN", "EXPLORE", *GUARDED_COMMANDS}
 DATA_COMMANDS = {"STATUS", "RANGE", "CAPS"}
 
@@ -76,15 +76,18 @@ def parse_reply(line: str | bytes) -> dict:
     if kind == "ERR" and len(words) > 1:
         return {"kind": "ERR", "reason": " ".join(words[1:]), "raw": raw}
     if kind == "CAPS":
-        if (len(words) not in {2, 3} or words[1] not in {"guarded=0", "guarded=1"}
-                or len(words) == 3 and words[2] != "cruise=1"):
+        if (not 2 <= len(words) <= 5 or words[1] not in {"guarded=0", "guarded=1"}
+                or any(word not in {"cruise=1", "noecho=1", "approach=1"} for word in words[2:])
+                or len(set(words[2:])) != len(words[2:])):
             raise ValueError("Invalid rover capabilities")
         return {"kind": "CAPS", "guarded": words[1] == "guarded=1", "raw": raw,
-                **({"cruise": True} if len(words) == 3 else {})}
+                **({"cruise": True} if "cruise=1" in words else {}),
+                **({"approach": True} if "approach=1" in words else {}),
+                **({"noecho": True} if "noecho=1" in words else {})}
     if kind == "OK" and len(words) >= 2:
         command = words[1]
         counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1,
-                  "STEP": 3, "PIVOT": 3, "CRUISE": 3, "NAVCFG": 11, "LED": 3, "CAL": 2}
+                  "STEP": 3, "PIVOT": 3, "CRUISE": 3, "APPROACH": 4, "NAVCFG": 11, "NOECHO": 1, "LED": 3, "CAL": 2}
         if command not in counts or len(words) != counts[command] + 2:
             raise ValueError(f"Malformed rover acknowledgement: {raw}")
         try:
@@ -94,21 +97,25 @@ def parse_reply(line: str | bytes) -> dict:
         if not all(math.isfinite(arg) for arg in args):
             raise ValueError("Nonfinite rover acknowledgement")
         if command in GUARDED_COMMANDS:
-            amount, speed, max_ms = args
+            amount, speed, max_ms = args[:3]
             ceiling = MAX_CRUISE_MS if command == "CRUISE" else MAX_GUARDED_MS
-            if (not (0 < amount <= 100 if command in {"STEP", "CRUISE"} else 0 < abs(amount) <= 180)
+            if (not (0 < amount <= 100 if command in {"STEP", "CRUISE", "APPROACH"} else 0 < abs(amount) <= 180)
                     or not 1 <= speed <= 60 or not max_ms.is_integer()
                     or not 1 <= max_ms <= ceiling):
                 raise ValueError("Malformed guarded movement acknowledgement")
+            if command == "APPROACH" and (amount > 5 or speed > 35 or not 3 <= args[3] <= 15):
+                raise ValueError("Malformed close approach acknowledgement")
         if command == "NAVCFG":
             navigation_args(dict(zip(NAVIGATION_KEYS, args)))
+        if command == "NOECHO" and args[0] not in {0, 1}:
+            raise ValueError("Malformed no-echo policy acknowledgement")
         if command == "LED" and any(not arg.is_integer() or not 0 <= arg <= 255 for arg in args):
             raise ValueError("Malformed rover LED acknowledgement")
         return {"kind": "OK", "command": command, "args": args, "raw": raw}
     if kind == "NAV" and len(words) == 3:
         cm = float(words[2])
-        valid_distance = cm == -1 if words[1] == "SENSOR_WAIT" else 2 <= cm <= 400
-        if (words[1] not in {"FORWARD", "TURN", "OBSTACLE", "SENSOR_WAIT", "SENSOR_READY"}
+        valid_distance = cm == -1 if words[1] in {"SENSOR_WAIT", "NO_ECHO"} else 2 <= cm <= 400
+        if (words[1] not in {"FORWARD", "TURN", "OBSTACLE", "SENSOR_WAIT", "SENSOR_READY", "NO_ECHO"}
                 or not math.isfinite(cm) or not valid_distance):
             raise ValueError("Invalid navigation observation")
         return {"kind": "NAV", "state": words[1], "cm": cm, "raw": raw}
@@ -217,21 +224,23 @@ class _Commands:
 
     def _validate(self, command: str, args: tuple) -> tuple:
         count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0, "CAPS": 0,
-                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "STEP": 3, "PIVOT": 3, "CRUISE": 3,
-                 "NAVCFG": 11, "RANGE": 1, "LED": 3, "CAL": 2}
+                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "STEP": 3, "PIVOT": 3, "CRUISE": 3, "APPROACH": 4,
+                 "NAVCFG": 11, "NOECHO": 1, "RANGE": 1, "LED": 3, "CAL": 2}
         if command not in count or len(args) != count[command]:
             raise ValueError("Invalid rover command")
         numbers = tuple(_finite(value, command) for value in args)
         if command in MOTION_COMMANDS:
-            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command in {"DRIVE", "STEP", "CRUISE"} else self.cfg.max_turn_deg)
+            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command in {"DRIVE", "STEP", "CRUISE", "APPROACH"} else self.cfg.max_turn_deg)
             if not (1 if command == "EXPLORE" else -bound) <= numbers[0] <= bound:
                 raise ValueError(f"{command} exceeds host distance/angle limit")
             if command in GUARDED_COMMANDS:
-                if numbers[0] == 0 or command in {"STEP", "CRUISE"} and numbers[0] < 0:
+                if numbers[0] == 0 or command in {"STEP", "CRUISE", "APPROACH"} and numbers[0] < 0:
                     raise ValueError("Guarded STEP requires forward travel; PIVOT requires a nonzero angle")
                 ceiling = MAX_CRUISE_MS if command == "CRUISE" else MAX_GUARDED_MS
                 if not numbers[2].is_integer() or not 1 <= numbers[2] <= ceiling:
                     raise ValueError(f"Guarded movement deadline must be an integer from 1 through {ceiling} ms")
+                if command == "APPROACH" and (numbers[0] > 5 or numbers[1] > 35 or not 3 <= numbers[3] <= 15):
+                    raise ValueError("Close approach exceeds distance, power or stopping-gap limits")
             if not 1 <= numbers[1] <= self.cfg.max_speed_pct:
                 raise ValueError("Rover speed must be between 1 and the profile limit")
             if self.estopped:
@@ -240,6 +249,8 @@ class _Commands:
                 raise ValueError("Rover movement refused while sentinel is listening")
         if command == "NAVCFG":
             navigation_args(dict(zip(NAVIGATION_KEYS, numbers)))
+        if command == "NOECHO" and numbers[0] not in {0, 1}:
+            raise ValueError("No-echo policy must be 0 or 1")
         if command == "RANGE" and numbers[0] not in range(6, 11):
             raise ValueError("Ultrasonic sensor port must be 6 through 10")
         if command == "LED" and any(not value.is_integer() or not 0 <= value <= 255 for value in numbers):
@@ -266,6 +277,10 @@ class _Commands:
         """One continuous forward target, with firmware range and time guards."""
         return self._command("CRUISE", (cm, speed_pct, max_ms))
 
+    def approach(self, cm, speed_pct, max_ms, stop_cm):
+        """Small forward move that stops at a measured close debris target."""
+        return self._command("APPROACH", (cm, speed_pct, max_ms, stop_cm))
+
     def cruise_observation(self):
         """Read streamed range without blocking behind the active motor command."""
         reading = self._cruise_range
@@ -276,6 +291,12 @@ class _Commands:
 
     def configure_navigation(self, settings):
         return self._command("NAVCFG", navigation_args(settings))
+
+    def set_no_echo_motion(self, enabled):
+        """Enable camera-directed guarded motion on explicit missing echoes."""
+        if not isinstance(enabled, bool):
+            raise ValueError("No-echo motion setting must be boolean")
+        return self._command("NOECHO", (int(enabled),))
 
     def explore(self, seconds, speed_pct=None):
         return self._command("EXPLORE", (seconds, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
@@ -413,8 +434,9 @@ class RoverLink(_Commands):
                             return
                         if reply["kind"] == "READY":
                             self._boot_ready.set()
-                        if reply["kind"] == "NAV" and reply["state"] == "FORWARD" and self.moving:
-                            self._cruise_range = {"valid": True, "cm": reply["cm"], "at": time.monotonic()}
+                        if reply["kind"] == "NAV" and reply["state"] in {"FORWARD", "NO_ECHO"} and self.moving:
+                            self._cruise_range = {"valid": reply["state"] != "NO_ECHO",
+                                                  "cm": reply["cm"], "at": time.monotonic()}
                         if reply["kind"] == "ERR":
                             self._fail_pending(reply["reason"])
                         else:
@@ -578,6 +600,8 @@ class RoverLink(_Commands):
                         raise ValueError("Rover firmware does not support guarded movement")
                     if command == "CRUISE" and not (self._capabilities or {}).get("cruise"):
                         raise ValueError("Rover firmware does not support CRUISE; upload the updated sketch")
+                    if command == "APPROACH" and not (self._capabilities or {}).get("approach"):
+                        raise ValueError("Rover firmware does not support APPROACH; upload the updated sketch")
                 motion = command in MOTION_COMMANDS
                 if motion:
                     self._continuous_command = command == "CRUISE"
@@ -703,7 +727,7 @@ class FakeRover(_Commands):
             with self._lock:
                 if command in GUARDED_COMMANDS:
                     raise ValueError("Fake rover does not model guarded sensor/encoder movement")
-                if self.moving and command in {"DRIVE", "TURN", "EXPLORE", "NAVCFG", "RANGE", "CAL", "LED"}:
+                if self.moving and command in {"DRIVE", "TURN", "EXPLORE", "NAVCFG", "NOECHO", "RANGE", "CAL", "LED"}:
                     raise ValueError("Fake rover is busy")
                 item = {"t": self.clock(), "command": command, "args": list(args)}
                 self.trace.append(item)

@@ -157,7 +157,9 @@
     const cue = patrol.verified_cue || patrol.trigger;
     text("patrol-audio", patrol.fault || (cue
       ? `${cue.label} · ${Number(cue.end).toFixed(1)}s · possible person; review evidence`
-      : patrol.decisions?.inspection_trigger === "debris_only" ? "Audio recorded · listening inspections start at camera-flagged debris"
+      : patrol.decisions?.inspection_trigger === "debris_only" ? (patrol.decisions?.debris_approach_enabled
+        ? "Audio recorded · listening begins after close debris arrival"
+        : "Audio recorded · listening inspections start at camera-flagged debris")
       : patrol.audio_stop_enabled ? "Audio investigation enabled" : "Scheduled listening stops"));
     const battery = patrol.battery;
     text("patrol-battery", typeof battery === "number" && Number.isFinite(battery) && battery >= 0 ? `${battery.toFixed(2)} V` : "—");
@@ -167,6 +169,8 @@
     if (decisions) {
       const parts = [decisions.armed ? "Guarded movement enabled" : "Observation only · movement disabled"];
       if (decisions.autonomous_exploration) parts.push("Autonomous exploration");
+      if (decisions.debris_approach_enabled) parts.push(`Close debris target ${Number(decisions.debris_stop_cm).toFixed(1)} cm`);
+      if (decisions.camera_only_motion) parts.push("No ultrasonic echo · camera controls movement");
       if (decisions.last_action) parts.push(decisions.last_action.replaceAll("_", " "));
       if (typeof decisions.latency_s === "number") parts.push(`Decision ${decisions.latency_s.toFixed(2)}s`);
       if (typeof decisions.front_cm === "number") parts.push(`Front ${decisions.front_cm.toFixed(1)} cm`);

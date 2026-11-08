@@ -22,13 +22,14 @@ class BenchRover(FakeRover):
         self.steps = []
         self.cruises = []
         self.pivots = []
+        self.approaches = []
         self.observations = []
         self.battery = 8
         self.cruise_finished = threading.Event()
         self.cruise_canceled = False
 
     def capabilities(self):
-        return {"guarded": True, "cruise": True}
+        return {"guarded": True, "cruise": True, "noecho": True, "approach": True}
 
     def cruise(self, cm, speed, deadline):
         self.cruise_finished.clear()
@@ -65,6 +66,13 @@ class BenchRover(FakeRover):
         self.pivots.append(deg)
         return True
 
+    def approach(self, cm, speed, deadline, stop_cm):
+        assert not self.moving
+        assert not self.engine_is_listening()
+        self.approaches.append((cm, speed, deadline, stop_cm))
+        self.front = max(stop_cm, self.front - cm)
+        return True
+
 
 @pytest.mark.parametrize("budget", [0, -1, True, float('nan'), float('inf')])
 def test_bad_distance_budget_rejected(budget):
@@ -83,13 +91,15 @@ def bench(monkeypatch):
     def make(*, front=120, fail_step=False, budget=50, choice=None, confidence=1.0,
              continuous=False, exploration=False, turns=False, chunk=None,
              battery=8, min_battery=None, trigger='audio_and_vision', stop_images=8,
-             jpeg=None):
+             jpeg=None, no_echo_motion=False, close_debris=False):
         profile = load_profile('pi-full-check')
         cfg = profile.rover
         cfg['settle_s'] = .01
+        cfg['decisions']['debris_approach']['enabled'] = close_debris
         cfg['decisions'].update(forward_budget_cm=budget, session_s=60, continuous_forward=continuous,
                                 autonomous_exploration=exploration, cruise_chunk_cm=chunk,
                                 min_battery_v=min_battery,
+                                no_echo_camera_motion=no_echo_motion,
                                 inspection_trigger=trigger,
                                 stop_image_history_size=stop_images,
                                 min_confidence=.7,
@@ -324,6 +334,7 @@ def test_exploration_turn_stops_cruise_then_requires_a_new_observation(bench):
 
 
 @pytest.mark.parametrize('fault,recover', [('obstacle_too_close', True), ('range_unknown', True),
+                                        ('navigation_not_configured', True),
                                         ('stall', False)])
 def test_exploration_recovers_only_expected_obstacle_or_echo_faults(bench, fault, recover):
     controller, rover, tick = bench(exploration=True)
@@ -379,9 +390,19 @@ def test_exploration_rejects_invalid_mode_and_segment_settings(change):
 
 def test_exploration_continuous_segments_keep_the_total_distance_bound(bench):
     controller, rover, tick = bench(continuous=True, exploration=True, chunk=20)
+    completed_cm = 0
     for _ in range(500):
         tick()
-        rover.cruise_finished.set()
+        requested_cm = controller.snapshot()['decisions']['forward_commanded_cm']
+        if requested_cm > completed_cm:
+            # Let the real worker dispatch before advancing the fake clock.
+            # Otherwise the test can observe a queued cruise as not yet moving.
+            deadline = time.monotonic() + 1
+            while sum(rover.cruises) < requested_cm and time.monotonic() < deadline:
+                time.sleep(.001)
+            assert sum(rover.cruises) == requested_cm
+            completed_cm = requested_cm
+            rover.cruise_finished.set()
         if controller.done:
             break
     assert controller.done
@@ -586,4 +607,294 @@ def test_stop_before_first_camera_frame_reports_photo_unavailable(bench):
 def test_stop_image_history_limit_must_be_a_positive_integer(limit):
     cfg = {**load_profile('pi-explore').rover['decisions'], 'stop_image_history_size': limit}
     with pytest.raises(ValueError, match='stop_image_history_size'):
+        validate_decision_settings(cfg)
+
+
+def test_no_echo_camera_mode_can_start_and_continue_cruise_without_inventing_distance(bench):
+    controller, rover, tick = bench(front=-1, exploration=True, continuous=True,
+                                   chunk=20, no_echo_motion=True, trigger='debris_only')
+    for _ in range(150):
+        tick()
+    assert rover.cruises == [20] and not rover.cruise_canceled
+    assert all(t['front_cm'] is None and t['range_valid'] is False and t['no_echo'] is True
+               for t, _ in rover.observations)
+    assert all('FORWARD_SHORT' in allowed for _, allowed in rover.observations)
+    assert controller.snapshot()['decisions']['camera_only_motion'] is True
+    assert controller.motion_allowed
+    assert any(e['command'] == 'NOECHO' and e['args'] == [1] for e in rover.trace)
+    assert controller.command('estop')['ok']
+    for _ in range(30):
+        tick()
+    assert controller.state == 'ESTOP' and not rover.moving
+
+
+def test_no_echo_turn_still_requires_turn_opt_in(bench):
+    controller, rover, tick = bench(front=-1, exploration=True, turns=True,
+        no_echo_motion=True, choice='TURN_LEFT_SHORT')
+    for _ in range(100):
+        tick()
+        if rover.pivots:
+            break
+    assert rover.pivots == [-10]
+    controller.allow_turns = False
+    assert 'TURN_LEFT_SHORT' not in controller._allowed_actions(None)
+    assert 'TURN_RIGHT_SHORT' not in controller._allowed_actions(None)
+
+
+@pytest.mark.parametrize('front', [10, 30, 40])
+def test_no_echo_camera_mode_never_overrides_a_valid_close_distance(bench, front):
+    controller, rover, tick = bench(front=front, exploration=True, no_echo_motion=True,
+                                   trigger='debris_only')
+    for _ in range(100):
+        tick()
+    assert not rover.steps and not rover.cruises
+    assert all('FORWARD_SHORT' not in allowed for _, allowed in rover.observations)
+    assert controller.snapshot()['decisions']['camera_only_motion'] is False
+
+
+@pytest.mark.parametrize('fault', ['silence', 'malformed', 'moving_mismatch'])
+def test_no_echo_camera_mode_requires_a_real_fresh_sensor_reply(bench, fault):
+    controller, rover, tick = bench(front=-1, exploration=True, no_echo_motion=True)
+    if fault == 'silence':
+        rover.range = lambda port: None
+    elif fault == 'malformed':
+        rover.range = lambda port: {'valid': False, 'cm': 999}
+    else:
+        rover.status = lambda: {'moving': True, 'batt': 8}
+    for _ in range(100):
+        tick()
+        if controller.state == 'REVIEW':
+            break
+    assert controller.state == 'REVIEW'
+    assert not rover.steps and not rover.cruises and not rover.observations
+
+
+def test_no_echo_camera_mode_stops_on_stale_streamed_telemetry(bench):
+    controller, rover, tick = bench(front=-1, exploration=True, continuous=True,
+                                   chunk=20, no_echo_motion=True)
+    for _ in range(100):
+        tick()
+        if rover.cruises:
+            break
+    assert rover.cruises == [20]
+    rover.cruise_observation = lambda: {'valid': False, 'cm': -1, 'moving': True, 'at': 0}
+    for _ in range(100):
+        tick()
+        if rover.cruise_canceled:
+            break
+    assert rover.cruise_canceled and not rover.moving
+
+
+def test_no_echo_camera_mode_cannot_use_old_firmware(bench):
+    controller, rover, tick = bench(front=-1, exploration=True, no_echo_motion=True)
+    rover.capabilities = lambda: {'guarded': True, 'cruise': True}
+    for _ in range(100):
+        tick()
+        if controller.state == 'REVIEW':
+            break
+    assert controller.state == 'REVIEW'
+    assert not rover.steps and not rover.cruises
+    assert 'NOECHO firmware' in controller.snapshot()['decisions']['reason']
+
+
+@pytest.mark.parametrize('failure', ['camera', 'policy_ack'])
+def test_no_echo_camera_mode_requires_working_camera_and_acknowledged_policy(bench, failure):
+    controller, rover, tick = bench(front=-1, exploration=True, no_echo_motion=True)
+    if failure == 'camera':
+        def broken_capture(**kwargs):
+            raise RuntimeError('camera failed')
+        controller.camera.capture = broken_capture
+    else:
+        rover.set_no_echo_motion = lambda enabled: False
+    for _ in range(100):
+        tick()
+        if controller.state == 'REVIEW':
+            break
+    assert controller.state == 'REVIEW'
+    assert not rover.steps and not rover.cruises and not rover.pivots
+
+
+def test_camera_stop_reapplies_ram_navigation_policy_before_the_next_move(bench):
+    def choice(telemetry):
+        return 'HOLD' if telemetry['moving'] and len(rover.cruises) == 1 else 'FORWARD_SHORT'
+    controller, rover, tick = bench(front=-1, exploration=True, continuous=True,
+        chunk=20, no_echo_motion=True, trigger='debris_only', choice=choice)
+    ram = {'navigation': False, 'noecho': False}
+    configure = rover.configure_navigation
+    policy = rover.set_no_echo_motion
+    cruise = rover.cruise
+    stop = rover.stop
+
+    def configure_ram(settings):
+        ram['navigation'] = True
+        return configure(settings)
+
+    def policy_ram(enabled):
+        assert ram['navigation']
+        ram['noecho'] = enabled
+        return policy(enabled)
+
+    def guarded_cruise(*args):
+        assert ram['navigation'] and ram['noecho']
+        return cruise(*args)
+
+    def reset_after_interrupt():
+        was_moving = rover.moving
+        result = stop()
+        if was_moving:
+            ram.update(navigation=False, noecho=False)
+        return result
+
+    rover.configure_navigation = configure_ram
+    rover.set_no_echo_motion = policy_ram
+    rover.cruise = guarded_cruise
+    rover.stop = reset_after_interrupt
+    for _ in range(300):
+        tick()
+        if len(rover.cruises) == 2:
+            break
+    assert rover.cruises == [20, 20]
+    assert sum(e['command'] == 'NOECHO' for e in rover.trace) == 2
+    assert ram['navigation'] and ram['noecho']
+
+
+@pytest.mark.parametrize('changes', [{'no_echo_camera_motion': 'yes'},
+                                     {'no_echo_camera_motion': None},
+                                     {'no_echo_camera_motion': True, 'autonomous_exploration': False}])
+def test_no_echo_camera_policy_is_explicit_and_requires_exploration(changes):
+    cfg = {**load_profile('pi-explore').rover['decisions'], **changes}
+    with pytest.raises(ValueError, match='no_echo_camera_motion'):
+        validate_decision_settings(cfg)
+
+
+def test_debris_is_approached_before_listening_and_each_step_gets_a_fresh_view(bench):
+    controller, rover, tick = bench(front=9, exploration=True, close_debris=True,
+        trigger='debris_only', choice=lambda t: 'INSPECT_DEBRIS' if t['front_cm'] <= 3.5 else 'APPROACH_DEBRIS')
+    for _ in range(200):
+        tick()
+        if controller.state == 'VERIFYING':
+            break
+    assert controller.state == 'VERIFYING'
+    assert rover.approaches == [(2, 35, 1000, 3)] * 3
+    assert [t['front_cm'] for t, _ in rover.observations] == [9, 7, 5, 3]
+    assert controller.snapshot()['decisions']['forward_commanded_cm'] == 6
+    assert controller.snapshot()['decisions']['stop_reason'] == 'debris_arrived'
+    assert not rover.steps and not rover.cruises
+
+
+@pytest.mark.parametrize('front', [120, 10, 4, -1])
+def test_close_debris_policy_never_offers_listening_for_far_or_unknown_distance(bench, front):
+    controller, rover, tick = bench(front=front, exploration=True, close_debris=True,
+                                   trigger='debris_only', no_echo_motion=True, choice='HOLD')
+    for _ in range(100):
+        tick()
+    assert rover.observations
+    assert all('INSPECT_DEBRIS' not in allowed and 'STOP_AND_LISTEN' not in allowed
+               for _, allowed in rover.observations)
+    assert controller.state in {'HOLDING', 'OBSERVING', 'DECIDING'}
+    assert not rover.approaches
+    if front == -1:
+        assert all('APPROACH_DEBRIS' not in allowed for _, allowed in rover.observations)
+
+
+@pytest.mark.parametrize('front', [2, 3, 3.4])
+def test_only_close_visible_debris_starts_listening_with_no_extra_creep(bench, front):
+    controller, rover, tick = bench(front=front, exploration=True, close_debris=True,
+                                   trigger='debris_only', choice='INSPECT_DEBRIS')
+    for _ in range(100):
+        tick()
+        if controller.state == 'VERIFYING':
+            break
+    assert controller.state == 'VERIFYING'
+    assert not rover.approaches and not rover.steps and not rover.cruises
+    assert controller.snapshot()['decisions']['stop_images'][0]['kind'] == 'possible_debris'
+
+
+def test_approach_does_not_listen_if_the_camera_loses_the_debris(bench):
+    def choose(t):
+        return 'APPROACH_DEBRIS' if t['front_cm'] == 5 else 'HOLD'
+    controller, rover, tick = bench(front=5, exploration=True, close_debris=True,
+                                   trigger='debris_only', choice=choose)
+    for _ in range(100):
+        tick()
+    assert len(rover.approaches) == 1 and rover.front == 3
+    assert controller.state in {'HOLDING', 'OBSERVING', 'DECIDING'}
+    assert not controller._debris_inspection_active
+
+
+def test_distant_model_listen_choice_is_rejected_without_approaching_or_listening(bench):
+    controller, rover, tick = bench(front=80, exploration=True, close_debris=True,
+                                   trigger='debris_only', choice='INSPECT_DEBRIS')
+    for _ in range(100):
+        tick()
+        if controller.state == 'REVIEW':
+            break
+    assert controller.state == 'REVIEW'
+    assert not rover.approaches and not controller._debris_inspection_active
+
+
+def test_close_approach_respects_remaining_forward_budget(bench):
+    controller, rover, tick = bench(front=15, exploration=True, close_debris=True,
+                                   trigger='debris_only', choice='APPROACH_DEBRIS', budget=3)
+    for _ in range(150):
+        tick()
+        if controller.done:
+            break
+    assert controller.done and controller.state == 'DONE'
+    assert [a[0] for a in rover.approaches] == [2, 1]
+    assert not controller._debris_inspection_active
+
+
+def test_close_approach_requires_new_firmware(bench):
+    controller, rover, tick = bench(front=10, exploration=True, close_debris=True, trigger='debris_only')
+    rover.capabilities = lambda: {'guarded': True, 'cruise': True, 'noecho': True}
+    for _ in range(100):
+        tick()
+        if controller.state == 'REVIEW':
+            break
+    assert controller.state == 'REVIEW' and not rover.approaches
+    assert 'APPROACH firmware' in controller.snapshot()['decisions']['reason']
+
+
+def test_close_approach_stops_cruise_before_dispatching_a_creep(bench):
+    def choose(t):
+        return 'FORWARD_SHORT' if not rover.cruises else 'APPROACH_DEBRIS'
+    controller, rover, tick = bench(front=80, continuous=True, exploration=True,
+        close_debris=True, trigger='debris_only', choice=choose, chunk=20)
+    for _ in range(150):
+        tick()
+        if rover.approaches:
+            break
+    assert rover.cruises == [20]
+    assert rover.cruise_canceled and rover.approaches
+    assert 'close approach' in controller.snapshot()['decisions']['stop_message']
+
+
+def test_missing_echo_during_close_approach_cannot_start_an_ordinary_cruise(bench):
+    def choose(t):
+        return 'HOLD' if t['front_cm'] is None else 'APPROACH_DEBRIS'
+    controller, rover, tick = bench(front=10, exploration=True, continuous=True,
+        close_debris=True, trigger='debris_only', no_echo_motion=True, choice=choose)
+    for _ in range(100):
+        tick()
+        if rover.approaches:
+            break
+    assert len(rover.approaches) == 1
+    rover.front = -1
+    for _ in range(100):
+        tick()
+    unknown = [allowed for t, allowed in rover.observations if t['front_cm'] is None]
+    assert unknown and all(allowed == ['HOLD'] for allowed in unknown)
+    assert len(rover.approaches) == 1 and not rover.cruises
+    assert controller.state in {'HOLDING', 'OBSERVING', 'DECIDING'}
+    assert not controller._debris_inspection_active
+
+
+@pytest.mark.parametrize('change', [{'enabled': 'yes'}, {'stop_cm': 0}, {'stop_cm': 2},
+    {'stop_cm': 16}, {'step_cm': 0}, {'step_cm': 6}, {'speed_pct': 36}, {'max_ms': 2001},
+    {'max_ms': True}, {'arrival_tolerance_cm': 2}])
+def test_bad_close_approach_settings_are_rejected(change):
+    cfg = load_profile('pi-explore').rover['decisions']
+    cfg['debris_approach'].update(change)
+    with pytest.raises(ValueError, match='debris_approach'):
         validate_decision_settings(cfg)

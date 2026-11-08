@@ -546,8 +546,23 @@ rover:
     continuous_forward: false
     # Retry no-echo readings while stopped and recover obstacle stops with fresh observations.
     autonomous_exploration: false
+    # Let fresh camera decisions authorize guarded movement after explicit missing echoes.
+    no_echo_camera_motion: false
     # Select whether audio/vision cues or only visual debris can start an inspection.
     inspection_trigger: audio_and_vision
+    debris_approach:
+      # Require a close measured arrival before a visual debris inspection.
+      enabled: false
+      # Target gap from the ultrasonic sensor face to debris, in centimeters.
+      stop_cm: 3.0
+      # Allow this much range noise at arrival, in centimeters.
+      arrival_tolerance_cm: 0.5
+      # Maximum encoder distance per camera-approved close approach, in centimeters.
+      step_cm: 2.0
+      # Fixed approach motor power; firmware caps this at 35 percent.
+      speed_pct: 35
+      # Firmware deadline for each approach step, in milliseconds.
+      max_ms: 1000
     # Optional distance per continuous forward segment; null reserves the remaining budget.
     cruise_chunk_cm: null
     # Optional minimum nominal rover battery reading before movement is offered.
@@ -604,6 +619,8 @@ rover:
       STOP_AND_LISTEN: "Stop and verify possible human signals using the existing audio procedure."
       # A distinct camera choice lets stop messages identify possible debris honestly.
       INSPECT_DEBRIS: "Visible debris or a rubble pile warrants stopping for an inspection at any distance."
+      # Only offered by the close-debris policy with fresh usable distance.
+      APPROACH_DEBRIS: "Take a bounded close approach toward visible debris; the host fixes speed, distance and stopping gap."
       # Always available when images, sensors, progress, or the situation are ambiguous.
       HOLD: "Stay stopped and obtain a fresh observation."
     camera:

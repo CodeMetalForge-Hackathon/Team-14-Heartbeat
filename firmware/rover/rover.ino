@@ -67,6 +67,8 @@ bool moving = false;
 bool turning = false;
 bool guardedMove = false;
 bool continuousMove = false;
+bool guardedApproach = false;
+float approachStopCm = 0;
 unsigned long guardedStartMs = 0, guardedDurationMs = 0, guardedLastRangeMs = 0;
 char guardedArgs[MAX_LINE + 1];
 char moveValue[MAX_LINE + 1];
@@ -80,6 +82,8 @@ unsigned long leftProgressMs = 0, rightProgressMs = 0;
 // EXPLORE is opt-in and configured in RAM by NAVCFG; no motor action on boot.
 const unsigned long RANGE_TIMEOUT_US = 24000;  // Bounded echo wait, about 4 m.
 bool navigationConfigured = false, exploring = false;
+// Opt-in for camera-directed guarded commands; cleared by NAVCFG and on boot.
+bool guardedNoEcho = false;
 enum NavigationPhase { NAV_WAIT, NAV_FORWARD, NAV_TURN, NAV_RETRY };
 NavigationPhase navigationPhase = NAV_WAIT;
 uint8_t rangePort = 0, navigationMaxTurns = 0, navigationTurns = 0;
@@ -120,6 +124,7 @@ void stopMotors() {
   exploring = false;
   guardedMove = false;  // STOP/faults cancel the entire one-shot transaction.
   continuousMove = false;
+  guardedApproach = false;
   leftPwm = rightPwm = 0.0f;
 }
 
@@ -280,25 +285,38 @@ float readFrontCm(uint8_t port) {
 }
 
 void startGuardedMove(bool isTurn, float amount, float speed, unsigned long maxMs,
-                      const char *amountText, const char *speedText, const char *maxText) {
+                      const char *amountText, const char *speedText, const char *maxText,
+                      float stopCm, const char *stopText) {
   if (moving || exploring) { fail(F("busy")); return; }
   if (!navigationConfigured) { fail(F("navigation_not_configured")); return; }
+  const bool isApproach = stopText != nullptr;
+  // Preserve exact accepted tokens for host acknowledgement correlation.
+  if (isApproach) {
+    snprintf(guardedArgs, sizeof(guardedArgs), "%s %s %s %s", amountText, speedText, maxText, stopText);
+  } else {
+    snprintf(guardedArgs, sizeof(guardedArgs), "%s %s %s", amountText, speedText, maxText);
+  }
   const unsigned long started = millis();
-  // Always acquire fresh evidence on the MCU; host/camera observations cannot
-  // authorize a stale range. Invalid echo fails stopped, with no auto-restart.
+  // Always sample the MCU sensor. Camera fallback applies only to missing
+  // echoes; a valid close obstacle still refuses the commanded movement.
   const float cm = readFrontCm(rangePort);
-  if (cm < 0) { fail(F("range_unknown")); return; }
-  if (cm < (isTurn ? navigationTurnClearanceCm : navigationClearCm)) {
+  if (cm < 0 && (isApproach || !guardedNoEcho)) { fail(F("range_unknown")); return; }
+  if (isApproach && cm <= stopCm) {
+    stopMotors();
+    Serial.print(F("OK APPROACH ")); Serial.println(guardedArgs);
+    return;
+  }
+  if (!isApproach && cm >= 0 && cm < (isTurn ? navigationTurnClearanceCm : navigationClearCm)) {
     fail(F("obstacle_too_close")); return;
   }
   if (millis() - started >= maxMs) { fail(F("guard_timeout")); return; }
   startMove(isTurn, amount, speed, amountText);
   if (!moving) return;  // Resolution/calibration failure has already stopped.
   guardedMove = true;
+  guardedApproach = isApproach;
+  approachStopCm = stopCm;
   guardedStartMs = started; guardedDurationMs = maxMs;
   guardedLastRangeMs = millis();
-  // Exact accepted tokens improve host correlation without float reformatting.
-  snprintf(guardedArgs, sizeof(guardedArgs), "%s %s %s", amountText, speedText, maxText);
 }
 
 void updateGuardedRange() {
@@ -317,12 +335,17 @@ void updateGuardedRange() {
   if (guardedLastRangeMs - guardedStartMs >= guardedDurationMs) {
     fail(F("guard_timeout")); return;
   }
-  if (cm < 0) { fail(F("range_unknown")); return; }
-  if (turning ? cm < navigationTurnClearanceCm : cm <= navigationStopCm) {
+  if (cm < 0 && (guardedApproach || !guardedNoEcho)) { fail(F("range_unknown")); return; }
+  if (guardedApproach && cm <= approachStopCm) {
+    stopMotors();
+    Serial.print(F("OK APPROACH ")); Serial.println(guardedArgs);
+    return;
+  }
+  if (!guardedApproach && cm >= 0 && (turning ? cm < navigationTurnClearanceCm : cm <= navigationStopCm)) {
     fail(F("obstacle_too_close")); return;
   }
   if (continuousMove) {
-    Serial.print(F("NAV FORWARD ")); Serial.println(cm, 2);
+    Serial.print(cm < 0 ? F("NAV NO_ECHO ") : F("NAV FORWARD ")); Serial.println(cm, 2);
   }
 }
 
@@ -420,7 +443,7 @@ void handleLine(char *line) {
     Serial.println(F("PONG rover v1"));
   } else if (strcmp(command, "CAPS") == 0 && count == 1) {
     lastCommandMs = millis();
-    Serial.println(F("CAPS guarded=1 cruise=1"));
+    Serial.println(F("CAPS guarded=1 cruise=1 noecho=1 approach=1"));
   } else if (strcmp(command, "STATUS") == 0 && count == 1) {
     lastCommandMs = millis();
     sendStatus();
@@ -452,10 +475,21 @@ void handleLine(char *line) {
     navigationStepCm = v[3]; navigationTurnDeg = v[4]; navigationMaxTurns = v[5];
     navigationPollMs = v[6]; navigationSettleMs = v[7]; navigationTurnClearanceCm = v[8];
     navigationRetryMs = v[9]; navigationGoodReadsRequired = v[10];
+    guardedNoEcho = false;
     navigationConfigured = true; lastCommandMs = millis();
     Serial.print(F("OK NAVCFG"));
     for (uint8_t i = 1; i < 12; ++i) { Serial.print(' '); Serial.print(tokens[i]); }
     Serial.println();
+  } else if (strcmp(command, "NOECHO") == 0 && count == 2) {
+    float enabled;
+    if (moving || exploring) { fail(F("busy")); return; }
+    if (!navigationConfigured) { fail(F("navigation_not_configured")); return; }
+    if (!parseNumber(tokens[1], enabled) || (enabled != 0 && enabled != 1)) {
+      fail(F("noecho_policy")); return;
+    }
+    guardedNoEcho = enabled == 1;
+    lastCommandMs = millis();
+    Serial.print(F("OK NOECHO ")); Serial.println(tokens[1]);
   } else if (strcmp(command, "EXPLORE") == 0 && count == 3) {
     float seconds, speed;
     if (moving || exploring) { fail(F("busy")); return; }
@@ -469,6 +503,18 @@ void handleLine(char *line) {
     navigationSpeed = speed; navigationDurationMs = static_cast<unsigned long>(seconds * 1000);
     navigationStartMs = navigationWaitMs = lastCommandMs = millis();
     navigationTurns = 0; navigationPhase = NAV_WAIT; exploring = true;
+  } else if (strcmp(command, "APPROACH") == 0 && count == 5) {
+    float amount, speed, maxMs, stopCm;
+    if (!parseNumber(tokens[1], amount) || !parseNumber(tokens[2], speed) ||
+        !parseNumber(tokens[3], maxMs) || !parseNumber(tokens[4], stopCm)) {
+      fail(F("number")); return;
+    }
+    if (amount <= 0 || amount > 5 || speed < 1 || speed > 35 ||
+        maxMs < 1 || maxMs > MAX_GUARDED_MS || maxMs != floorf(maxMs) ||
+        stopCm < 3 || stopCm > 15) { fail(F("limit")); return; }
+    lastCommandMs = millis();
+    startGuardedMove(false, amount, speed, static_cast<unsigned long>(maxMs),
+                     tokens[1], tokens[2], tokens[3], stopCm, tokens[4]);
   } else if ((strcmp(command, "STEP") == 0 || strcmp(command, "PIVOT") == 0 ||
               strcmp(command, "CRUISE") == 0) && count == 4) {
     float amount, speed, maxMs;
@@ -483,7 +529,7 @@ void handleLine(char *line) {
         maxMs != floorf(maxMs)) { fail(F("limit")); return; }
     lastCommandMs = millis();
     startGuardedMove(isTurn, amount, speed, static_cast<unsigned long>(maxMs),
-                     tokens[1], tokens[2], tokens[3]);
+                     tokens[1], tokens[2], tokens[3], 0, nullptr);
     continuousMove = moving && isContinuous;
   } else if ((strcmp(command, "DRIVE") == 0 || strcmp(command, "TURN") == 0) && count == 3) {
     float amount, speed;
@@ -601,9 +647,10 @@ void updateMotion() {
     }
     const bool completedGuarded = guardedMove;
     const bool completedContinuous = continuousMove;
+    const bool completedApproach = guardedApproach;
     stopMotors();
     if (completedGuarded) {
-      Serial.print(completedContinuous ? F("OK CRUISE ") : turning ? F("OK PIVOT ") : F("OK STEP "));
+      Serial.print(completedApproach ? F("OK APPROACH ") : completedContinuous ? F("OK CRUISE ") : turning ? F("OK PIVOT ") : F("OK STEP "));
       Serial.println(guardedArgs);
     } else {
       Serial.print(turning ? F("OK TURN ") : F("OK DRIVE "));

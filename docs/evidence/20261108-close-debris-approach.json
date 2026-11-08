@@ -1,0 +1,73 @@
+{
+  "recorded_at": "2026-11-08T13:34:59.172433+00:00",
+  "scope": "Code-only close debris approach; rover disconnected",
+  "hardware_access": false,
+  "firmware_uploaded": false,
+  "live_pipeline_started": false,
+  "configuration": {
+    "profile": "pi-explore",
+    "inspection_trigger": "debris_only",
+    "no_echo_camera_motion": true,
+    "debris_approach": {
+      "enabled": true,
+      "stop_cm": 3.0,
+      "arrival_tolerance_cm": 0.5,
+      "step_cm": 2.0,
+      "speed_pct": 35,
+      "max_ms": 1000
+    }
+  },
+  "software_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "1025",
+      "time": "174.539",
+      "timestamp": "2026-11-08T08:31:13.243494-05:00",
+      "hostname": "raspberrypi"
+    }
+  ],
+  "controller_cases": [
+    "9 -> 7 -> 5 -> 3 cm before stationary verification",
+    "Far and unknown range cannot start listening",
+    "Lost visual target stays stopped at close range",
+    "Missing echo during close approach cannot start an ordinary cruise",
+    "Cruise stops and gets fresh observations before close approach",
+    "Approach consumes the same forward distance budget",
+    "STOP/reconnect restores RAM navigation and no-echo settings"
+  ],
+  "firmware_checks": {
+    "method": "Actual sketch compiled with fake Arduino IO and address/undefined-behavior sanitizers",
+    "passed": [
+      "Approach target stops both motors",
+      "Close range arrival without initial movement",
+      "Encoder step returns exact APPROACH acknowledgement",
+      "Unknown echo aborts even with NOECHO enabled",
+      "STOP, watchdog, stall and action deadline remain active",
+      "Invalid movement/target parameters rejected",
+      "Ordinary exploration retains its original range guards"
+    ]
+  },
+  "avr_build": {
+    "target": "arduino:avr:mega:cpu=atmega2560",
+    "avr_core": "1.8.8",
+    "makeblock_commit": "21b20bb",
+    "library_setting": "dot_a_linkage=true",
+    "flash_bytes": 25814,
+    "static_ram_bytes": 1380,
+    "source_sha256": "a92c7601e51978b97e3e8e6f3bd221b3f2946a0033390fa46e396c667e76082e",
+    "hex_sha256": "ae3e5682c86cab2882156a62690b670cecc22fae45b917a89b59dbb11e138ff9",
+    "artifact": "runs/close-debris-firmware-build/rover.ino.hex",
+    "uploaded": false
+  },
+  "dashboard_check": "JavaScript parsed successfully by Chromium using new Function without executing the app",
+  "limitations": [
+    "3 cm is a nominal ultrasonic gap with 0.5 cm arrival tolerance, not physical contact detection.",
+    "No bumper/contact switch or piezo capture input was implemented; current Stick firmware supports built-in PDM only.",
+    "Microphone mounting offset, coasting, sonar near-field accuracy and knock sensitivity require physical validation.",
+    "Camera recognition/alignment accuracy and rescue performance remain unvalidated.",
+    "Matching APPROACH-capable firmware must be uploaded after reconnection."
+  ]
+}

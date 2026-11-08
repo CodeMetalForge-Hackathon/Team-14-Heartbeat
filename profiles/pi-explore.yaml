@@ -9,8 +9,15 @@ rover:
     continuous_forward: true
     # Recheck no-echo readings and ordinary obstacles without ending exploration.
     autonomous_exploration: true
+    # Operator-selected camera control when a healthy RANGE reply has valid=0.
+    no_echo_camera_motion: true
     # Only the camera's INSPECT_DEBRIS choice starts the stationary listening procedure.
     inspection_trigger: debris_only
+    debris_approach:
+      # Approach visible debris before starting the stationary listening procedure.
+      enabled: true
+      # Nominal gap measured from the ultrasonic sensor face, not proof of contact.
+      stop_cm: 3.0
     # Reserve at most 20 cm per cruise, preserving budget for later directions.
     cruise_chunk_cm: 20
     # Enable a voltage cutoff only after verifying this pack type and ADC calibration.
@@ -22,9 +29,18 @@ rover:
         Start or continue a bounded forward segment within the remaining operator
         distance budget. The host fixes speed and distance, continuously checks
         audio and range, and requests new camera decisions during movement.
+      APPROACH_DEBRIS: >-
+        Approach recognizable debris that is aligned ahead using a short bounded
+        forward move. Prefer this over ordinary forward travel when approaching
+        a debris site. Reassess the image after each move; HOLD if alignment,
+        support, identity or the approach path becomes uncertain.
+      INSPECT_DEBRIS: >-
+        Stop and listen at visible debris after the host's close-distance target
+        is reached. This choice is unavailable while the target is far away or
+        distance is unknown. It does not establish physical microphone contact.
     # Accept offered motion proposals scoring at least 0.50; local motion guards still apply.
     min_confidence: 0.50
-    # Inspect visible debris at any range; motion remains subject to local guards.
+    # Reach a close debris position before listening; motion stays locally bounded.
     mission: >-
       Explore the visible supported ground and find debris or rubble worth
       inspecting. Choose FORWARD_SHORT when offered and the next path is visibly
@@ -34,16 +50,23 @@ rover:
       turn proposals during travel first stop the rover and require another
       observation before a turn is dispatched. Never infer side clearance or
       absence of an edge from front ultrasonic distance alone.
-      Choose INSPECT_DEBRIS as soon as recognizable debris or a rubble pile is
-      visible, regardless of its ultrasonic distance. Do not approach to a
-      numerical standoff distance before inspecting it. Only visual debris
-      starts an investigation in this mission. Sounds are recorded but do not
+      Choose APPROACH_DEBRIS when recognizable debris or a rubble pile is aligned
+      ahead and that choice is offered. Approach it using the host's short moves,
+      continually checking alignment, support and the target's identity. Choose
+      INSPECT_DEBRIS only after the close target is reached and the debris is
+      still visible. Do not start listening merely because distant debris is
+      visible. The final listening position needs a valid close distance; an
+      unknown echo is never proof of arrival or microphone contact.
+      Only close visual debris starts an investigation. Sounds are recorded but do not
       request a stop while exploring. Listen for knock responses after stopping
       at a debris site. A person or ordinary background sound alone does not
       start the listening procedure; retain HOLD for a person obstructing travel.
-      When range_valid is false, only stationary choices are available. Choose
-      HOLD to keep inspecting and retrying range, or INSPECT_DEBRIS for visible
-      debris. A missing echo never means open space. Choose HOLD
+      When range_valid is false and no_echo_camera_motion is true, choose an
+      offered movement using the fresh camera view of visibly supported and
+      unobstructed ground. A missing echo is unknown distance, not proof of open
+      space. Continue positioning toward an aligned visible target only on
+      supported unobstructed ground; the host requires usable range for the
+      final close approach. Choose HOLD
       for an edge, unsupported ground, ambiguous travel evidence or unsafe turn.
       Respect the host's time and distance budgets. Reserved forward distance
       is not completed travel. No response never means nobody is there.
