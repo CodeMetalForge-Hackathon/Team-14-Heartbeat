@@ -1,0 +1,146 @@
+# Camera-guided exploration; inherits omitted settings from rubble.yaml.
+# Compatible with the running clap-distress service on port 8767.
+rover:
+  navigation:
+    # Verified on this Pi/rover: port 10 returns valid range; port 6 has no echo.
+    sensor_port: 10
+  decisions:
+    # Keep forward motor output running while camera/API and audio checks continue.
+    continuous_forward: true
+    # Recheck no-echo readings and ordinary obstacles without ending exploration.
+    autonomous_exploration: true
+    # Reserve at most 20 cm per cruise, preserving budget for later directions.
+    cruise_chunk_cm: 20
+    # Enable a voltage cutoff only after verifying this pack type and ADC calibration.
+    min_battery_v: null
+    # Bound the single continuous forward target in milliseconds.
+    cruise_max_ms: 15000
+    action_descriptions:
+      FORWARD_SHORT: >-
+        Start or continue a bounded forward segment within the remaining operator
+        distance budget. The host fixes speed and distance, continuously checks
+        audio and range, and requests new camera decisions during movement.
+    # Accept offered motion proposals scoring at least 0.50; local motion guards still apply.
+    min_confidence: 0.50
+    # Inspect visible debris at any range; motion remains subject to local guards.
+    mission: >-
+      Explore the visible supported ground and find debris or rubble worth
+      inspecting. Choose FORWARD_SHORT when offered and the next path is visibly
+      supported and unobstructed. During forward travel it means continue the
+      active bounded segment. If an ordinary obstacle blocks forward progress,
+      choose an offered short turn toward a visibly supported alternative;
+      turn proposals during travel first stop the rover and require another
+      observation before a turn is dispatched. Never infer side clearance or
+      absence of an edge from front ultrasonic distance alone.
+      Choose INSPECT_DEBRIS as soon as recognizable debris or a rubble pile is
+      visible, regardless of its ultrasonic distance. Do not approach to a
+      numerical standoff distance before inspecting it. Also stop and listen
+      for a visible person signaling for help using STOP_AND_LISTEN. The audio controller separately
+      investigates accepted knocks or vocal distress.
+      When range_valid is false, only stationary choices are available. Choose
+      HOLD to keep inspecting and retrying range, INSPECT_DEBRIS for visible
+      debris, or STOP_AND_LISTEN for a rescue cue. A missing echo never means open space. Choose HOLD
+      for an edge, unsupported ground, ambiguous travel evidence or unsafe turn.
+      Respect the host's time and distance budgets. Reserved forward distance
+      is not completed travel. No response never means nobody is there.
+    # Pi lifted-track bench: 25% timed out; 35% completed 3 cm within 1 s. Floor test pending.
+    speed_pct: 35
+    # Cap the sum of forward requests; physical distance needs calibration.
+    forward_budget_cm: 100
+    # Bound this exploration session to two minutes, including stationary holds.
+    session_s: 120
+  audio_stop:
+    # Applies only to hb patrol; hb listen/run never issue motor commands.
+    enabled: true
+    # Accepted knocks or vocal distress cues request a stationary investigation.
+    trigger_mode: all
+    # Continue through route checkpoints without scheduled audio investigations.
+    scheduled_listen: false
+    # One accepted knock requests STOP; classification threshold remains unchanged.
+    knock_count: 1
+classifier:
+  # Explicit selection; does not change the default Pi/YAMNet/heuristic path.
+  name: clap
+  # Initial relative-score threshold only; calibrate on real short onset clips.
+  threshold: 0.6
+  clap:
+    # Change the host to the Jetson's LAN address for remote inference.
+    endpoint: http://127.0.0.1:8767
+    # Per-request transport timeout; failed inference uses the configured fallback.
+    timeout_s: 1.5
+    # Maximum queued/in-flight onset requests, including the active request.
+    max_pending: 4
+    # Maximum stream-time age from impact to result, including 0.875s look-ahead.
+    max_lag_s: 2.5
+    # Pretrained model already used in the exploratory five-second tester.
+    model: laion/clap-htsat-unfused
+    # Model repository revision; use the same value on service and client.
+    revision: main
+    # CPU on Mac; set cuda for a Jetson with a compatible GPU-enabled PyTorch.
+    device: cpu
+    # Torch CPU threads; benchmark rather than assuming more threads is faster.
+    cpu_threads: 2
+    # These descriptions together define the positive class.
+    positive_prompts:
+      - The sound of a person knocking on a table with their knuckles.
+      - The sound of a person banging on a table with their fist.
+    # Fixed comparison classes; changing descriptions also changes score meaning.
+    negative_prompts:
+      - The sound of an object being dropped or set down on a table.
+      - The sound of a table being accidentally bumped.
+      - The sound of a mechanical motor or servo clicking and tapping.
+      - The sound of footsteps.
+      - The sound of people talking or a speaker playing speech.
+      - The sound of music playing.
+      - The sound of typing on a keyboard.
+      - The sound of quiet background room noise.
+    # Continuous vocal observations; never fed to knock-pattern counting.
+    monitor:
+      # Classify vocal windows alongside impact clips; transcription stays disabled.
+      enabled: true
+      # Duration and interval of overlapping windows, in seconds.
+      window_s: 3.0
+      hop_s: 1.0
+      # Uncalibrated relative class-score cutoff.
+      threshold: 0.55
+      # Skip very quiet windows before classification/transcription.
+      min_dbfs: -50.0
+      # Minimum seconds between review alerts; observations still logged.
+      cooldown_s: 5.0
+      # Bound the monitor HTTP request, including optional transcription.
+      timeout_s: 3.0
+      # Vocal classes and ordinary comparison sounds are separate from knocks.
+      prompts:
+        SCREAM:
+          - The sound of a person screaming.
+        SHOUT:
+          - The sound of a person shouting loudly.
+        CRYING:
+          - The sound of a person crying and sobbing.
+        SPEECH:
+          - The sound of a person speaking normally.
+        # Informational only: breathing does not trigger a distress alert.
+        BREATHING:
+          - The sound of a person breathing in and out.
+          - The sound of a person breathing heavily and panting.
+        OTHER:
+          - The sound of people laughing and cheering.
+          - The sound of music or television playing.
+          - The sound of machinery and motors running.
+          - The sound of knocking or objects banging on a table.
+          - The sound of quiet background room noise.
+          - The sound of wind blowing across a microphone.
+          - The sound of a fan blowing air.
+          - The sound of clothing rustling against a microphone.
+      # Optional English transcription. Off avoids an extra model download.
+      asr:
+        enabled: false
+        model: openai/whisper-tiny.en
+        revision: main
+        # Whole-word phrase matching on normalized transcripts; not proof of distress.
+        phrases:
+          - help
+          - help me
+          - I am trapped
+          - I'm trapped
+          - over here

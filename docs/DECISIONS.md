@@ -113,6 +113,72 @@ while building this feature.
 
 ## Start in observation mode
 
+### Camera-guided autonomous exploration
+
+Use `pi-explore` for exploration with camera decisions, ultrasonic avoidance,
+audio investigation and the dashboard together. It keeps the 30 cm front motor
+cutoff and 45 cm forward-start requirement. Unlike the forward-only
+`pi-full-check` test, it supports short turns after an acknowledged STOP and a
+new camera/range observation. Turning still requires `--allow-turns` and physical
+verification of direction and clearance.
+
+The replacement Pi's actual ultrasonic connection was verified on **port 10**:
+three readings were 99.71–99.81 cm while port 6 returned no echo. Both
+`pi-explore` and `pi-full-check` now select port 10. Earlier port-6 instructions
+describe the old wiring; an explicit `--sensor-port 6` would override the fix.
+
+The mission requests `INSPECT_DEBRIS` when the camera recognizes debris or a
+rubble pile at any distance. This is a model recommendation, not a validated
+debris detector. It cannot confirm a survivor. Ordinary obstacles can trigger
+a stop, reobservation, a permitted turn and continued exploration. Stall,
+communication, STOP, camera and API failures still require review.
+
+An explicit `cm=-1 valid=0` reply now keeps the camera and audio active while
+the rover remains stopped and retries. Only HOLD, STOP_AND_LISTEN and INSPECT_DEBRIS
+are offered with an unknown distance. A valid echo can restore motion choices automatically;
+a broken sensor cannot be made safe by assuming that no echo means open space.
+No flat calibration target is a runtime prerequisite. Terminal output, dashboard
+status and event logs include readable reasons for stops. A distinct
+`INSPECT_DEBRIS` choice prints "Camera flagged possible debris"; a generic HOLD
+prints "Camera requested HOLD" and is never relabeled as debris. Other messages
+identify obstacle rechecks, turns, knocks, low confidence and missing range.
+
+Start the classifier with:
+
+```bash
+bash scripts/clap_pi.sh --profile profiles/pi-explore.yaml
+```
+
+Then run the following after identifying the rover and microphone ports and
+verifying the physical movement setup. These paths match the observed Pi setup;
+recheck them after changing USB connections:
+
+```bash
+uv run --no-sync --env-file .env.local hb patrol \
+  --decisions --profile pi-explore \
+  --rover /dev/serial/by-path/platform-xhci-hcd.1-usbv2-0:1:1.0-port0 \
+  --device stick:/dev/serial/by-id/usb-Hades2001_M5stack_81520161EE-if00-port0 \
+  --sensor-port 10 --knocker speaker --dashboard --host 127.0.0.1 --port 8001 \
+  --arm-motion --allow-turns
+```
+
+Omit `--arm-motion` to observe without motor commands. The profile bounds a
+session to 120 seconds and a cumulative 100 cm of reserved forward commands,
+using segments of at most 20 cm. Interrupted distances are not refunded.
+These are command budgets, not calibrated chassis travel. Press `e` + Enter
+for E-STOP, or Ctrl+C to close. A missing echo blocks turns as well as forward
+travel. The dashboard describes distance retries instead of presenting an
+unknown distance as an obstacle measurement.
+
+An optional `min_battery_v` setting can restrict movement using the nominal
+battery reading. It is disabled in this profile pending pack/ADC calibration.
+The live run reported 6.94 V, but the operator subsequently confirmed a new
+battery and an actual forward step. This ADC estimate alone does not establish
+battery health. The last known reading stays visible during a cruise; it is
+refreshed from STATUS while stationary, not continuously measured under load.
+
+### Forward-only check
+
 Resolve the owned rover and microphone separately using their actual Pi device
 identities. Prefer `/dev/serial/by-id/...`; Mac `/dev/cu.*` names do not apply.
 Replace `ROVER_ID` and `MIC_ID` below. Only one process may own each serial port.

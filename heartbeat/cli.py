@@ -420,6 +420,9 @@ class _DialogConsole:
                 text += " · holding; review evidence, then r + Enter to resume"
             if data.get("fault"):
                 text += f" · {data['fault']}"
+            message = data.get("decisions", {}).get("status_message")
+            if message:
+                text += f" · {message}"
         elif event.type == "rover" and data.get("reply", {}).get("kind") == "NAV":
             reply = data["reply"]
             text = ("NAV SENSOR_WAIT · motors stopped; retrying distance sensor"
@@ -431,8 +434,8 @@ class _DialogConsole:
             text = f"DECISION {data.get('action', data.get('last_action', 'HOLD'))}"
             if isinstance(data.get("latency_s"), (int, float)):
                 text += f" · API {data['latency_s']:.2f}s"
-            if data.get("reason"):
-                text += f" · {data['reason']}"
+            if data.get("status_message") or data.get("reason"):
+                text += f" · {data.get('status_message') or data['reason']}"
         elif event.type == "round_result":
             text = (f"round {data['round']}: expected {data['expected']}, heard {data['heard']}  "
                     f"{'match' if data['matched'] else 'no match'}  {data['odds']}")

@@ -1,6 +1,9 @@
 # Supervised 50 cm Decisions check; inherits omitted settings from rubble.yaml.
 # Compatible with the running clap-distress service on port 8767.
 rover:
+  navigation:
+    # Replacement Pi setup: live readings identify the ultrasonic sensor on port 10.
+    sensor_port: 10
   decisions:
     # Keep forward motor output running while camera/API and audio checks continue.
     continuous_forward: true

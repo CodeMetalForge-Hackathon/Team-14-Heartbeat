@@ -544,6 +544,12 @@ rover:
     forward_budget_cm: null
     # Opt in to one uninterrupted forward target with observations during motion.
     continuous_forward: false
+    # Retry no-echo readings while stopped and recover obstacle stops with fresh observations.
+    autonomous_exploration: false
+    # Optional distance per continuous forward segment; null reserves the remaining budget.
+    cruise_chunk_cm: null
+    # Optional minimum nominal rover battery reading before movement is offered.
+    min_battery_v: null
     # Firmware deadline for a continuous target; protocol ceiling is 30000 ms.
     cruise_max_ms: 15000
     # Fixed absolute angle assigned to either turn choice, in degrees.
@@ -592,6 +598,8 @@ rover:
       TURN_RIGHT_SHORT: "Turn slightly right to inspect another direction; do not claim side clearance from a front photo."
       # Starts deterministic stationary audio verification, never confirms a survivor by itself.
       STOP_AND_LISTEN: "Stop and verify possible human signals using the existing audio procedure."
+      # A distinct camera choice lets stop messages identify possible debris honestly.
+      INSPECT_DEBRIS: "Visible debris or a rubble pile warrants stopping for an inspection at any distance."
       # Always available when images, sensors, progress, or the situation are ambiguous.
       HOLD: "Stay stopped and obtain a fresh observation."
     camera:

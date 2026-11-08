@@ -1,0 +1,116 @@
+{
+  "recorded_at": "2026-11-08T12:18:54.966954+00:00",
+  "feature": "Autonomous camera/range/audio exploration with explicit stop reasons",
+  "software_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "948",
+      "time": "129.550",
+      "timestamp": "2026-11-08T07:14:59.234843-05:00",
+      "hostname": "raspberrypi"
+    }
+  ],
+  "sensor_port_diagnosis": {
+    "6": [
+      {
+        "kind": "RANGE",
+        "port": 6,
+        "cm": -1.0,
+        "valid": false,
+        "raw": "RANGE port=6 cm=-1.00 valid=0"
+      },
+      {
+        "kind": "RANGE",
+        "port": 6,
+        "cm": -1.0,
+        "valid": false,
+        "raw": "RANGE port=6 cm=-1.00 valid=0"
+      },
+      {
+        "kind": "RANGE",
+        "port": 6,
+        "cm": -1.0,
+        "valid": false,
+        "raw": "RANGE port=6 cm=-1.00 valid=0"
+      }
+    ],
+    "10": [
+      {
+        "kind": "RANGE",
+        "port": 10,
+        "cm": 99.71,
+        "valid": true,
+        "raw": "RANGE port=10 cm=99.71 valid=1"
+      },
+      {
+        "kind": "RANGE",
+        "port": 10,
+        "cm": 99.81,
+        "valid": true,
+        "raw": "RANGE port=10 cm=99.81 valid=1"
+      },
+      {
+        "kind": "RANGE",
+        "port": 10,
+        "cm": 99.71,
+        "valid": true,
+        "raw": "RANGE port=10 cm=99.71 valid=1"
+      }
+    ]
+  },
+  "current_sensor_port": 10,
+  "operator_report": {
+    "battery": "Operator reports a new battery; nominal ADC voltage is not calibrated.",
+    "motion": "Operator reports one actual forward step during the first exploration run."
+  },
+  "stop_reason_validation": {
+    "run_dir": "runs/exploration-reasons-20261108-dzcPXD",
+    "commands": [
+      {
+        "t": 7.456,
+        "command": "CRUISE",
+        "args": [
+          20.0,
+          35.0,
+          15000.0
+        ]
+      }
+    ],
+    "stop_reasons": [
+      {
+        "t": 8.432,
+        "reason": "model_hold",
+        "message": "Stopping: Camera requested HOLD; checking the scene again"
+      },
+      {
+        "t": 12.64,
+        "reason": "classified_audio_cue",
+        "message": "Stopping: Knocks detected; investigating the sound"
+      },
+      {
+        "t": 30.016,
+        "reason": "session_budget_expired",
+        "message": "Stopping: Exploration time limit reached"
+      }
+    ],
+    "stop_acknowledged": true,
+    "completed_guarded_targets": 0
+  },
+  "limits": {
+    "session_s": 120,
+    "reserved_forward_cm": 100,
+    "cruise_segment_cm": 20,
+    "front_stop_cm": 30,
+    "forward_start_cm": 45,
+    "validation_session_s": 30
+  },
+  "unverified": [
+    "Calibrated chassis travel distance",
+    "Physical debris-recognition accuracy",
+    "Physical avoidance turns around an obstacle"
+  ],
+  "nominal_battery_cutoff": "Optional and disabled pending pack/ADC calibration"
+}

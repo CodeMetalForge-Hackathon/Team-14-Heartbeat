@@ -45,8 +45,11 @@ def validate_decision_settings(settings):
         raise ValueError("rover.decisions must be a mapping")
     cfg = deepcopy(dict(settings))
     cfg.setdefault("continuous_forward", False)
+    cfg.setdefault("autonomous_exploration", False)
     if not isinstance(cfg["continuous_forward"], bool):
         raise ValueError("rover.decisions.continuous_forward must be boolean")
+    if not isinstance(cfg["autonomous_exploration"], bool):
+        raise ValueError("rover.decisions.autonomous_exploration must be boolean")
     positive = ("session_s", "observation_max_age_s", "decision_interval_s", "hold_s",
                 "forward_cm", "turn_deg", "speed_pct", "worker_join_s")
     try:
@@ -60,6 +63,12 @@ def validate_decision_settings(settings):
             duration = cfg.get("cruise_max_ms")
             if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 30000:
                 raise ValueError("cruise_max_ms must be an integer from 1 through 30000")
+        if cfg.get("cruise_chunk_cm") is not None:
+            chunk = _number(cfg["cruise_chunk_cm"], "cruise_chunk_cm")
+            if chunk > 100:
+                raise ValueError("cruise_chunk_cm must be at most 100")
+        if cfg.get("min_battery_v") is not None:
+            _number(cfg["min_battery_v"], "min_battery_v")
         if cfg["session_s"] > 600:
             raise ValueError("rover.decisions.session_s must be at most 600 seconds")
         _number(cfg["action_settle_s"], "action_settle_s", positive=False)
@@ -110,7 +119,7 @@ class DecisionsPatrol(Patrol):
                  arm_motion=False, allow_turns=False):
         cfg = deepcopy(dict(getattr(cfg, "rover", cfg)))
         decisions = validate_decision_settings(cfg.get("decisions"))
-        if decisions["continuous_forward"] and allow_turns:
+        if decisions["continuous_forward"] and allow_turns and not decisions["autonomous_exploration"]:
             raise ValueError("Continuous forward mode does not support turns")
         navigation_args(cfg.get("navigation"))
         if not isinstance(arm_motion, bool) or not isinstance(allow_turns, bool):
@@ -149,6 +158,9 @@ class DecisionsPatrol(Patrol):
         self._stop_until = None
         self._verification_for_resume = False
         self._cruise_active = False
+        self._last_motion_error = None
+        self._last_stop_reason = None
+        self._last_stop_message = None
         super().__init__(rover, pipeline, engine, prompter,
                          [{"name": "Decision search 1", "moves": []}], cfg)
         self._observation_thread = threading.Thread(
@@ -166,8 +178,58 @@ class DecisionsPatrol(Patrol):
             "steps": self._steps, "pending": self._pending_observation is not None,
             "forward_commanded_cm": self._forward_commanded_cm,
             "forward_budget_cm": self.decision_cfg.get("forward_budget_cm"),
+            "autonomous_exploration": self.decision_cfg["autonomous_exploration"],
+            "range_valid": _finite_number(self._last_front_cm) and 2 <= self._last_front_cm <= 400,
+            "status_message": self._status_message(),
+            "stop_reason": self._last_stop_reason,
+            "stop_message": self._last_stop_message,
         }
         return snap
+
+    def _reason_message(self, reason):
+        if reason == "classified_audio_cue":
+            return ("Knocks detected; investigating the sound" if
+                    (self._trigger or {}).get("label") == "KNOCK_BURST" else
+                    "Possible distress sound detected; investigating")
+        return {
+            "debris_detected": "Camera flagged possible debris; inspecting and listening",
+            "decisions_stop_and_listen": "Camera requested an inspection; listening for a response",
+            "model_hold": "Camera requested HOLD; checking the scene again",
+            "low_confidence": "Movement confidence below threshold; checking the scene again",
+            "obstacle_recheck": "Obstacle detected; looking for another route",
+            "turn_requires_fresh_observation": "Changing direction; checking the turn before moving",
+            "range_recheck": "Distance reading unavailable; retrying the sensor",
+            "waiting_for_range": "Distance reading unavailable; retrying the sensor",
+            "low_battery": "Reported battery voltage below the configured minimum",
+            "battery_unavailable": "Battery reading unavailable",
+            "session_budget_expired": "Exploration time limit reached",
+            "forward_budget_exhausted": "Forward distance budget reached",
+            "motion_disarmed": "Observation mode; movement is disabled",
+            "operator_resume_verification": "Operator resumed; checking fresh audio before exploring",
+            "aborted": "Exploration stopped by operator",
+            "estop": "Emergency stop latched",
+            "done": "Exploration complete",
+            "preparing": "Preparing rover and navigation",
+            "initial_settling": "Allowing the rover to settle before observing",
+            "action_settling": "Movement completed; checking the next direction",
+            "capturing": "Checking camera and distance",
+            "awaiting_decision": "Assessing the camera view and sensor readings",
+            "fresh_observation_after_resume": "Checking a fresh observation before continuing",
+        }.get(reason, str(reason).replace("_", " "))
+
+    def _status_message(self):
+        if self.state == "MOVING":
+            if self._cruise_active:
+                return "Exploring forward"
+            return {"TURN_LEFT_SHORT": "Turning left to explore another direction",
+                    "TURN_RIGHT_SHORT": "Turning right to explore another direction"}.get(
+                        self._last_action, "Exploring forward")
+        message = self._reason_message(self._decision_reason)
+        if self.state == "STOPPING":
+            return "Stopping: " + message
+        if self.state in {"HOLDING", "REVIEW", "SETTLING", "VERIFYING", "LISTENING", "DONE", "ABORTED", "ESTOP"}:
+            return "Stopped: " + message
+        return message
 
     def _decision_event(self, stage, **data):
         metadata = {**self.snapshot()["decisions"], **data, "stage": stage}
@@ -198,6 +260,10 @@ class DecisionsPatrol(Patrol):
         if not 0 <= age <= self.decision_cfg["observation_max_age_s"]:
             return False
         action, front = intent["action"], intent["front_cm"]
+        if not self._battery_ready():
+            return False
+        if not _finite_number(front) or not 2 <= front <= 400:
+            return False
         if action == "FORWARD_SHORT":
             return front >= self.cfg["navigation"]["clear_cm"]
         return (action in {"TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"} and self.allow_turns
@@ -263,8 +329,17 @@ class DecisionsPatrol(Patrol):
                 and pending["generation"] == self._generation and not self._closed
                 and not self._halted and not self.done and self.state in NAVIGATION_STATES)
 
-    def _allowed_actions(self, front_cm):
+    def _battery_ready(self, voltage=None):
+        minimum = self.decision_cfg.get("min_battery_v")
+        voltage = self.battery if voltage is None else voltage
+        return minimum is None or (_finite_number(voltage) and voltage >= minimum)
+
+    def _allowed_actions(self, front_cm, battery=None):
         choices = list(STATIONARY_ACTIONS)
+        if self.decision_cfg["autonomous_exploration"]:
+            choices.append("INSPECT_DEBRIS")
+        if not _finite_number(front_cm) or not 2 <= front_cm <= 400 or not self._battery_ready(battery):
+            return choices
         if front_cm >= self.cfg["navigation"]["clear_cm"] and (self._forward_remaining() > 0 or self._cruise_active):
             choices.append("FORWARD_SHORT")
         if self.allow_turns and front_cm >= self.cfg["navigation"]["turn_clearance_cm"]:
@@ -342,15 +417,24 @@ class DecisionsPatrol(Patrol):
         else:
             reading = self.rover.range(self.cfg["navigation"]["sensor_port"])
             status = self.rover.status()
-        if (not isinstance(reading, Mapping) or reading.get("valid") is not True
-                or not _finite_number(reading.get("cm")) or not 2 <= reading["cm"] <= 400):
+        range_valid = (isinstance(reading, Mapping) and reading.get("valid") is True
+                       and _finite_number(reading.get("cm")) and 2 <= reading["cm"] <= 400)
+        # An explicit no-echo reply is still a healthy serial transaction.
+        # Exploration can inspect the image and retry while stopped, but no
+        # movement choice is offered until a fresh distance becomes valid.
+        no_echo = (isinstance(reading, Mapping) and reading.get("valid") is False
+                   and reading.get("cm") == -1)
+        if not range_valid and not (self.decision_cfg["autonomous_exploration"]
+                                    and no_echo and not self._cruise_active):
             raise _ObservationError("Front range is invalid or unavailable")
         if pending["cancel"].is_set():
             return None
         if not isinstance(status, Mapping) or status.get("moving") is not self._cruise_active:
             raise _ObservationError("Stopped rover status could not be verified")
-        front = float(reading["cm"])
-        telemetry = {"front_cm": front, "moving": self._cruise_active, "armed": self.armed,
+        front = float(reading["cm"]) if range_valid else None
+        telemetry = {"front_cm": front, "range_valid": range_valid,
+                     "moving": self._cruise_active, "armed": self.armed,
+                     "autonomous_exploration": self.decision_cfg["autonomous_exploration"],
                      "continuous_forward": self.decision_cfg["continuous_forward"],
                      "continuous_target_in_progress": self._cruise_active,
                      "allow_turns": self.allow_turns, "steps": self._steps,
@@ -367,7 +451,7 @@ class DecisionsPatrol(Patrol):
         observed = min(captured, range_at)
         if monotonic() - observed > self.decision_cfg["observation_max_age_s"]:
             raise _ObservationError("Camera or range observation expired before the decision request")
-        allowed = self._allowed_actions(front)
+        allowed = self._allowed_actions(front, telemetry.get("battery", self.battery))
         self.pipeline.call_soon(lambda: self._frame_ready(pending, captured, sequence, telemetry))
         try:
             result = self.client.choose(frame, telemetry, allowed)
@@ -411,7 +495,8 @@ class DecisionsPatrol(Patrol):
         self._last_frame_at, self._last_frame_sequence = captured, sequence
         pending["deadline"] = min(pending["deadline"], captured + self.decision_cfg["observation_max_age_s"])
         self._last_front_cm = telemetry["front_cm"]
-        self.battery = telemetry.get("battery")
+        if "battery" in telemetry:
+            self.battery = telemetry["battery"]
         self._decision_reason = "awaiting_decision"
         if not self._cruise_active:
             self._emit_state("DECIDING")
@@ -469,14 +554,20 @@ class DecisionsPatrol(Patrol):
             self._hold("model_hold", pending["after"])
         elif confidence < self.decision_cfg["min_confidence"]:
             self._hold("low_confidence", pending["after"])
-        elif action == "STOP_AND_LISTEN":
+        elif action in {"STOP_AND_LISTEN", "INSPECT_DEBRIS"}:
             self._record_outcome("stop_and_listen")
             self._verification_for_resume = False
-            self._request_navigation_stop("investigate", "decisions_stop_and_listen")
+            self._request_navigation_stop("investigate", "debris_detected" if
+                                          action == "INSPECT_DEBRIS" else "decisions_stop_and_listen")
         elif not self.armed:
             self._hold("motion_disarmed", pending["after"])
         elif self._budget_due():
             self._request_navigation_stop("budget", "session_budget_expired")
+        elif self._cruise_active and action in {"TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"}:
+            # Stop first and discard this proposal. Turning requires another
+            # camera/range observation after STOP is acknowledged.
+            self._record_outcome("turn_requires_stop")
+            self._request_navigation_stop("hold", "turn_requires_fresh_observation")
         else:
             self._motion_intent = {"action": action, "observed": value["observed"],
                                    "front_cm": value["telemetry"]["front_cm"],
@@ -498,7 +589,9 @@ class DecisionsPatrol(Patrol):
                 if self.decision_cfg["continuous_forward"]:
                     self._cruise_active = True
                     self._next_observation_at = monotonic() + self.decision_cfg["decision_interval_s"]
-                    self._submit("cruise", (self._forward_remaining(), speed,
+                    distance = min(self._forward_remaining(),
+                                   self.decision_cfg.get("cruise_chunk_cm") or self._forward_remaining())
+                    self._submit("cruise", (distance, speed,
                                  self.decision_cfg["cruise_max_ms"]), "decision_moved")
                 else:
                     self._submit("step", (self.decision_cfg["forward_cm"], speed, max_ms), "decision_moved")
@@ -516,7 +609,13 @@ class DecisionsPatrol(Patrol):
             return
         self._motion_intent = None
         self._record_outcome(reason)
-        self._decision_reason = reason
+        if reason == "model_hold" and not self._battery_ready():
+            self._decision_reason = "low_battery" if _finite_number(self.battery) else "battery_unavailable"
+        elif (reason == "model_hold" and self.decision_cfg["autonomous_exploration"]
+                and self._last_front_cm is None):
+            self._decision_reason = "waiting_for_range"
+        else:
+            self._decision_reason = reason
         self._next_observation_at = max(monotonic() + self.decision_cfg["hold_s"],
                                         request_started + self.decision_cfg["decision_interval_s"])
         self._emit_state("HOLDING")
@@ -536,6 +635,8 @@ class DecisionsPatrol(Patrol):
                 ok = False
             else:
                 try:
+                    if method in {"step", "pivot", "cruise"}:
+                        self._last_motion_error = None
                     ok = getattr(self.rover, method)(*args)
                 except Exception:
                     ok = False
@@ -550,6 +651,15 @@ class DecisionsPatrol(Patrol):
                 self._cancel_observation()
             self._motion_intent = None
             if ok is not True:
+                if (self.decision_cfg["autonomous_exploration"]
+                        and self._last_motion_error in {"obstacle_too_close", "range_unknown"}):
+                    self._record_outcome(self._last_motion_error)
+                    # RoverLink retires the connection after a firmware ERR.
+                    # Reopening can reset the MCU, losing its RAM-only NAVCFG.
+                    self._navigation_ready = False
+                    self._request_navigation_stop("hold", "obstacle_recheck" if
+                        self._last_motion_error == "obstacle_too_close" else "range_recheck")
+                    return
                 self._record_outcome("failed")
                 self._review_failure("Guarded motion failed, expired, or was not acknowledged")
                 return
@@ -570,6 +680,9 @@ class DecisionsPatrol(Patrol):
             super()._completed(generation, completion, ok)
 
     def _event(self, event):
+        if (event.type == "error" and event.data.get("source") == "rover"
+                and event.data.get("command") in {"STEP", "PIVOT", "CRUISE"}):
+            self._last_motion_error = event.data.get("message")
         super()._event(event)
         if self.done or self._halted:
             return
@@ -613,6 +726,8 @@ class DecisionsPatrol(Patrol):
         self._interrupted_move = self._interrupted_move or was_moving
         self._arrival_unverified = self._arrival_unverified or was_moving
         self._stop_context, self._decision_reason = context, reason
+        self._last_stop_reason = reason
+        self._last_stop_message = self._reason_message(reason)
         self._close_gate()
         self._deadline = self.pipeline.t + self.audio_stop["stop_timeout_s"]
         self._stop_until = monotonic() + self.audio_stop["stop_timeout_s"]
@@ -648,6 +763,11 @@ class DecisionsPatrol(Patrol):
             self._begin_settle()
 
     def _review_failure(self, reason):
+        if (self.decision_cfg["autonomous_exploration"] and self._cruise_active and reason in {
+                "Front range is invalid or unavailable",
+                "Continuous range telemetry expired or is unavailable"}):
+            self._request_navigation_stop("hold", "range_recheck")
+            return
         generation = self._generation
         if self._history and self._history[-1]["outcome"] == "dispatched":
             self._record_outcome("failed")
@@ -691,7 +811,7 @@ class DecisionsPatrol(Patrol):
             elif self.state == "OBSERVING" and self._pending_observation is None:
                 self._launch_observation("observe" if self._navigation_ready else "prepare")
             elif self.state == "HOLDING" and monotonic() >= self._next_observation_at:
-                self._launch_observation()
+                self._launch_observation("observe" if self._navigation_ready else "prepare")
             return
         if self.state == "VERIFYING" and t >= self._deadline and self._verification_for_resume:
             self._verification_for_resume = False

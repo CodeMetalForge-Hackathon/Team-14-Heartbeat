@@ -121,10 +121,20 @@
     decisionLine.hidden = !decisions;
     if (decisions) {
       const parts = [decisions.armed ? "Guarded movement enabled" : "Observation only · movement disabled"];
+      if (decisions.autonomous_exploration) parts.push("Autonomous exploration");
       if (decisions.last_action) parts.push(decisions.last_action.replaceAll("_", " "));
       if (typeof decisions.latency_s === "number") parts.push(`Decision ${decisions.latency_s.toFixed(2)}s`);
       if (typeof decisions.front_cm === "number") parts.push(`Front ${decisions.front_cm.toFixed(1)} cm`);
-      if (decisions.reason) parts.push(decisions.reason);
+      if (decisions.status_message) parts.push(decisions.status_message);
+      else if (decisions.reason) parts.push(({
+        waiting_for_range: "Distance unavailable · stopped and retrying",
+        range_recheck: "Rechecking distance while stopped",
+        obstacle_recheck: "Obstacle detected · assessing another direction",
+        turn_requires_fresh_observation: "Stopped · checking before turning",
+        low_battery: "Battery voltage low · movement disabled",
+        battery_unavailable: "Battery reading unavailable · movement disabled",
+      })[decisions.reason] || decisions.reason);
+      if (decisions.stop_message && patrol.moving) parts.push(`Last stop: ${decisions.stop_message}`);
       decisionLine.textContent = parts.join(" · ");
     }
     byId("patrol-arrival-warning").hidden = !patrol.arrival_unverified;
@@ -251,7 +261,8 @@
       case "round_result": return `Round ${d.round}: asked ${d.expected}, heard ${d.heard} · ${d.matched ? "matched" : "did not match"} · ${d.odds}`;
       case "answer": return `${({q_people: "People", q_move: "Can move", q_hurt: "Hurt"})[d.question] || d.question}: ${d.value}`;
       case "approval": return `Approved${d.gap ? ` ${d.gap}` : ""}${d.operator ? ` by ${d.operator}` : " by operator"}`;
-      case "patrol": return `Patrol: ${patrolPhase(d)}${d.gap ? ` · ${d.gap}` : ""}`;
+      case "patrol": return `Patrol: ${patrolPhase(d)}${d.gap ? ` · ${d.gap}` : ""}${d.decisions?.status_message ? ` · ${d.decisions.status_message}` : ""}`;
+      case "decision": return d.status_message || d.reason || "Navigation assessment";
       case "gap_result": return `${d.gap}: ${String(d.status || "").replaceAll("_", " ")} · ${d.odds || "—"}${d.arrival_unverified ? " · arrival unverified" : ""}`;
       case "patrol_done": return d.aborted ? "Patrol stopped" : "Patrol route complete";
       case "operator": return d.message || (d.command === "all_quiet"
