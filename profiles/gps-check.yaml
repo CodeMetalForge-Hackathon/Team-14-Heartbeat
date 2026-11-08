@@ -1,0 +1,13 @@
+# Bounded USB GNSS diagnostic settings; not an hb audio profile.
+# Observation duration in seconds.
+duration_s: 30.0
+# UART default; native USB CDC does not use this as its USB transfer speed.
+baudrate: 38400
+# Maximum time a single serial read can block, in seconds.
+read_timeout_s: 0.5
+# Interval between status reports, in seconds.
+report_interval_s: 5.0
+# Maximum age of a navigation sentence accepted as a current fix, in seconds.
+stale_s: 3.0
+# Bound the length of an incoming NMEA sentence, in bytes.
+max_sentence_bytes: 1024

@@ -73,11 +73,15 @@ No movement flag exists on `decisions-preview`.
 
 Use the existing [Pi setup](PI.md) and [rover firmware setup](../firmware/rover/README.md).
 This feature adds no Python dependencies and does not install a CLAP model on Pi.
-The existing CLAP service currently runs on the Mac at port 8767. If it stays
-there, change `classifier.clap.endpoint` in the Pi's selected profile to a
-reachable Mac LAN address, for example `http://192.168.1.20:8767`.
-Pi `127.0.0.1` points to the Pi, not the Mac. Ensure the service listens on an
-appropriate reachable interface. Do not assume PyTorch CLAP runs locally on Pi.
+For a CLAP service on the Pi, follow [Local Pi CLAP setup](PI-CLAP-LOCAL.md).
+For this guide's knock-only patrol, launch that helper with the matching profile:
+`bash scripts/clap_pi.sh --profile profiles/clap-knocks.yaml --allow-download`.
+After the model is cached, omit `--allow-download`; wait for `CLAP ready` before
+starting patrol. The profile's `http://127.0.0.1:8767` then reaches the local service.
+If CLAP instead runs on the Mac, set `classifier.clap.endpoint` to its reachable
+LAN address, for example `http://192.168.1.20:8767`, and ensure the service listens
+on a reachable interface. Pi `127.0.0.1` points to the Pi, not the Mac. The new
+CPU-only service setup does not establish end-to-end rover readiness or throughput.
 
 ## Credentials and firmware
 

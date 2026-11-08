@@ -44,6 +44,12 @@ Timings, burst size, freshness limit, and enable switch are under
 on in `clap-distress`. `hb listen` and `hb run` remain observation-only with
 respect to rover movement. No optional model dependency was added to the core.
 
+For stationary automatic spoken responses before the rover is connected, use
+`hb run --auto --profile clap-distress`; see [VOICE-RESPONSE.md](VOICE-RESPONSE.md).
+Patrol keeps `dialog.auto_challenge` disabled and owns its STOP/settle/verify
+sequence, so the stationary vocal response hook does not issue prompts during
+travel or bypass this controller.
+
 ## Try the state machine without hardware
 
 From the repository root:
@@ -68,11 +74,12 @@ Terminal 1, start the existing service (add `--allow-download` only if needed):
 uv run --python 3.12 --script tools/clap_service.py --profile profiles/clap-distress.yaml
 ```
 
-Terminal 2, after checking the route and substituting the actual rover serial
-port for `/dev/ttyACM0`:
+Terminal 2, after checking the route and substituting the actual rover's stable
+serial ID for `ACTUAL_ROVER_ID` below. The connected NEO-M9N GPS currently uses
+`/dev/ttyACM0`; do not select that GPS port as the rover:
 
 ```bash
-uv run hb patrol --profile clap-distress --rover /dev/ttyACM0 --device stick --knocker manual --dashboard
+uv run hb patrol --profile clap-distress --rover /dev/serial/by-id/ACTUAL_ROVER_ID --device stick --knocker manual --dashboard
 ```
 
 `--knocker manual` displays prompts for a human to carry out. Select the already

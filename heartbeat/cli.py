@@ -88,7 +88,8 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--wav", type=Path)
     run.add_argument("--knocker", default="auto", help="auto, manual, speaker, or serial port")
     run.add_argument("--speaker-device", type=_device)
-    run.add_argument("--auto", action="store_true", help="automatically challenge and interview")
+    run.add_argument("--auto", action="store_true",
+                     help="automatically challenge on knock bursts or enabled distress alerts, then interview")
     run.add_argument("--profile", default="rubble")
     sim = commands.add_parser("sim", help="simulate a survivor through the real audio pipeline")
     sim.add_argument("--people", type=int, default=2)

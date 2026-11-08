@@ -276,7 +276,7 @@ dialog:
   burst_window_s: 4.0
   # Quiet interval after a burst before an automatic challenge, in seconds.
   quiet_s: 1.5
-  # Start challenges automatically after a spontaneous burst when enabled.
+  # Automatically challenge after knock bursts or fresh enabled-monitor distress alerts.
   auto_challenge: false
   # Number of knocks in the first challenge round.
   first_pattern: 3
@@ -435,10 +435,14 @@ rover:
   read_timeout_s: 0.05
   # Bound command writes so STOP cannot wait indefinitely behind another write.
   write_timeout_s: 0.1
-  # Total identity-handshake deadline, including AVR USB startup, in seconds.
+  # Legacy startup setting retained for older configs; use boot_timeout_s below.
   connect_timeout_s: 5.0
-  # Wait for each startup PING before retrying identity on the same connection.
+  # Legacy retry setting retained for older configs; use boot_ping_interval_s below.
   connect_retry_s: 0.25
+  # Maximum total wait for boot and a valid rover PONG, in seconds.
+  boot_timeout_s: 4.0
+  # Repeat startup PING while waiting for READY/PONG, in seconds.
+  boot_ping_interval_s: 0.5
   # Maximum wait for a non-motion reply, in seconds.
   command_timeout_s: 3.0
   # Host motion timeout, in seconds; firmware independently stops after 30 seconds.
