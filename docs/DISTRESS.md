@@ -2,8 +2,10 @@
 
 This experimental mode runs three-second CLAP windows every second alongside
 the existing impact classifier. It reports SCREAM, SHOUT, CRYING, SPEECH, BREATHING, OTHER,
-or UNCERTAIN. Vocal events never enter the knock-counting dialog or control
-motors. Possible distress is a request for human review, not confirmation.
+or UNCERTAIN. Vocal events never enter the knock-counting dialog. `hb listen`
+and `hb run` do not control motors. In `hb patrol`, this profile enables
+automatic stop, settle, fresh-audio verification, and operator review; see
+[the rover audio guide](ROVER-AUDIO.md). Possible distress is not confirmation.
 
 From the repository root, start the service in terminal 1:
 
@@ -49,7 +51,8 @@ uv run hb run --device stick:/dev/cu.usbserial-81520161EE --profile clap-distres
 
 The activity log displays observations and review alerts. Observation metadata
 is included in black-box events; the normal full-session raw recording supports
-later inspection. There is no new motor action or automatic CONFIRMED state.
+later inspection. Only the deterministic challenge-response engine can decide
+CONFIRMED; CLAP observations cannot.
 
 ## Optional exact help phrases
 

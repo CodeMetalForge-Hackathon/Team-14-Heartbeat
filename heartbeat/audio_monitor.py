@@ -58,17 +58,27 @@ class AudioMonitor:
         self.ready = self.pending = None
         self.generation = 0
         self.blocked_until = 0.0
+        self.patrol_blocked = False
+        self.patrol_phase = None
         self.last_alert = -float("inf")
         self.skipped = 0
         self.unsubscribe = bus.subscribe(self._event)
 
     def _event(self, event):
-        if event.type not in {"prompt_start", "prompt_end"}:
+        if event.type == "patrol" and event.data.get("audio_stop_enabled"):
+            phase = event.data.get("state")
+            if phase == self.patrol_phase:
+                return  # Status refreshes must not continually reset the window.
+            self.patrol_phase = phase
+            self.patrol_blocked = phase in {"STOPPING", "SETTLING", "PAUSED", "FAULT", "ESTOP", "ABORTED"}
+        elif event.type in {"prompt_start", "prompt_end"}:
+            self.blocked_until = float("inf") if event.type == "prompt_start" else event.t + self.tail_s
+        else:
             return
         self.generation += 1
         self.buffer.clear()
         self.ready = None
-        self.blocked_until = float("inf") if event.type == "prompt_start" else event.t + self.tail_s
+        self.next_end = self.end + self.size
 
     def feed(self, block):
         start = round(block.t0 * SAMPLE_RATE)
@@ -77,7 +87,7 @@ class AudioMonitor:
             self.ready = None
             self.generation += 1
         self.end = start + len(block.x)
-        if block.t0 < self.blocked_until:
+        if self.patrol_blocked or block.t0 < self.blocked_until:
             self.buffer.clear()
             return
         self.buffer.extend(block.x)

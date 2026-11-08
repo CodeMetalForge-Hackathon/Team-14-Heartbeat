@@ -475,6 +475,19 @@ rover:
   fake_turn_deg_s: 90.0
   # Motor-off settling time before opening detection, in stream seconds.
   settle_s: 2.0
+  audio_stop:
+    # Opt in to automatic audio stops and operator review at every checked gap.
+    enabled: false
+    # Fresh stationary audio collection period, after motor settling.
+    verify_s: 8.0
+    # Maximum age of a completed audio window when its result arrives.
+    max_age_s: 3.0
+    # Accepted classified knocks required to request investigation.
+    knock_count: 3
+    # Maximum interval containing the candidate knock burst.
+    knock_window_s: 2.0
+    # Stream-time STOP deadline; serial transport also enforces its own timeout.
+    stop_timeout_s: 6.0
   # Maximum dialog time at each gap, in stream seconds.
   gap_timeout_s: 120.0
   # Motor speed percent for route legs.
@@ -483,6 +496,10 @@ rover:
   stop_on_done: true
   # The only gap with a simulated survivor in the hardware-free patrol.
   sim_survivor_gap: Gap 2
+  # Inject labeled synthetic distress events only in the hardware-free demo.
+  sim_audio_cue: false
+  # Delay into movement before the simulated distress event.
+  sim_audio_cue_after_s: 0.5
   # RGB ring color for NO_SIGNS.
   led_no_signs: [64, 64, 64]
   # RGB ring color for POSSIBLE.

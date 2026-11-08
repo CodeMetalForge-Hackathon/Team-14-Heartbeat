@@ -1,5 +1,9 @@
 # Experimental CLAP service. Inherits the audio/dialog settings in rubble.yaml.
 # Start tools/clap_service.py before selecting this profile in hb listen/run.
+rover:
+  audio_stop:
+    # Applies only to hb patrol; hb listen/run never issue motor commands.
+    enabled: true
 classifier:
   # Explicit selection; does not change the default Pi/YAMNet/heuristic path.
   name: clap

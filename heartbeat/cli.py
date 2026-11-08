@@ -392,6 +392,14 @@ class _DialogConsole:
         text = None
         if event.type == "state":
             text = f"{data.get('state', '?')}  status={data.get('status', '?')}"
+        elif event.type == "patrol":
+            text = f"ROVER {data['state']} · {data.get('gap') or 'route'}"
+            if data["state"] == "REVIEW":
+                text += " · holding; review evidence, then r + Enter to resume"
+            if data.get("fault"):
+                text += f" · {data['fault']}"
+        elif event.type == "patrol_cue":
+            text = f"ROVER {data['phase']}: {data['label']} at {data['end']:.2f}s"
         elif event.type == "round_result":
             text = (f"round {data['round']}: expected {data['expected']}, heard {data['heard']}  "
                     f"{'match' if data['matched'] else 'no match'}  {data['odds']}")
