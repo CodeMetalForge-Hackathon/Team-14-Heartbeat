@@ -405,3 +405,52 @@ def test_rover_demo_profile_loads_with_one_knock_stop_and_direct_challenge():
     assert stop["enabled"] and stop["trigger_mode"] == "knocks" and stop["challenge_after_stop"]
     assert profile.classifier.name == "heuristic"
     assert profile.dialog["announce_count"] and profile.dialog["min_matched_rounds"] == 1
+
+
+def test_auto_resume_leaves_review_and_starts_next_gap(setup):
+    pipeline, patrol, commands, _ = setup
+    patrol.challenge_after_stop = True
+    patrol.auto_resume_s = 5.0
+    pipeline.step(3.1)
+    observation(pipeline, 3.1)
+    pipeline.step(3.2)
+    pipeline.step(5.2)
+    assert patrol.state == "LISTENING"
+    patrol._engine_command("reset")
+    patrol._gap_result(patrol.engine.snapshot(), "NO_RESPONSE")
+    pipeline.step(6)
+    assert patrol.state == "REVIEW"
+    pipeline.step(10.9)
+    assert patrol.state == "REVIEW"
+    pipeline.step(11.1)
+    pipeline.step(11.2)
+    assert patrol.gap_name == "B"
+
+
+def test_repeat_route_appends_lanes_up_to_max_loops():
+    profile = load_profile("rover-demo")
+    pipeline = ManualPipeline()
+    engine = DialogEngine(replace(profile, dialog=dict(profile.dialog, auto_challenge=False)),
+                          lambda *args: None, rng_seed=1)
+    session = SimpleNamespace(engine=engine, command_result=lambda name: (engine.command(name, pipeline.t), {"ok": True})[1],
+                              _active=None)
+    rover = FakeRover(cfg=profile.rover, clock=lambda: pipeline.t)
+    route = [{"name": "Lane", "moves": [["drive", 10]]}]
+    patrol = Patrol(rover, pipeline, session, SimpleNamespace(), route, {**profile.rover, "max_loops": 3})
+    try:
+        patrol.gap_index = 0
+        patrol._next_gap()
+        assert [gap["name"] for gap in patrol.route] == ["Lane", "Lane 2"] and not patrol.done
+        patrol._next_gap()
+        assert [gap["name"] for gap in patrol.route] == ["Lane", "Lane 2", "Lane 3"]
+        patrol._next_gap()
+        assert patrol.done and len(patrol.route) == 3
+    finally:
+        patrol.close()
+
+
+@pytest.mark.parametrize("change", [{"auto_resume_s": -1}, {"repeat_route": "yes"}, {"max_loops": 0}])
+def test_bad_loop_configuration_is_rejected(setup, change):
+    pipeline, patrol, _, _ = setup
+    with pytest.raises(ValueError, match="rover\\."):
+        Patrol(patrol.rover, pipeline, patrol.engine, SimpleNamespace(), patrol.route, {**patrol.cfg, **change})

@@ -26,13 +26,18 @@ dialog:
 rover:
   # Motor speed percent for the lane legs; 35% measured about 3.5 cm/s today.
   speed_pct: 40
+  # After a knock investigation is reported, drive on automatically after this many seconds.
+  auto_resume_s: 5.0
+  # Drive the 1 m lane again when it ends, until max_loops lanes (about 3 m) or E-STOP.
+  repeat_route: true
+  max_loops: 3
   audio_stop:
     # Stop the rover when the stick hears a knock while driving.
     enabled: true
     # Only classified knocks stop the rover; speech and other sounds do not.
     trigger_mode: knocks
-    # Also stop, listen and challenge at the end of the lane.
-    scheduled_listen: true
+    # Keep searching through lane ends; stop only when a knock is heard.
+    scheduled_listen: false
     # One accepted knock stops the rover; raise to 2 if track noise causes false stops.
     knock_count: 1
     # Challenge right after the stop settles instead of waiting for a second knock.

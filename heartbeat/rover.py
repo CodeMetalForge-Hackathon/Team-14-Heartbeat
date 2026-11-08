@@ -423,6 +423,10 @@ class RoverLink(_Commands):
                         continue
                     line = bytes(pending)
                     pending.clear()
+                    if line.strip() == b"PING":
+                        # While the Auriga resets on port open, our own PING can be
+                        # echoed back. It is not a reply; the boot handshake retries.
+                        continue
                     try:
                         reply = parse_reply(line)
                     except (ValueError, UnicodeError) as exc:

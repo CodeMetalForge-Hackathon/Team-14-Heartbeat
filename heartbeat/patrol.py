@@ -94,6 +94,22 @@ class Patrol:
         self.challenge_after_stop = self.audio_stop.get("challenge_after_stop", False)
         if not isinstance(self.challenge_after_stop, bool):
             raise ValueError("rover.audio_stop.challenge_after_stop must be boolean")
+        # Opt-in: leave REVIEW automatically after this many stream seconds (null = operator).
+        self.auto_resume_s = self.cfg.get("auto_resume_s")
+        if self.auto_resume_s is not None and (
+                isinstance(self.auto_resume_s, bool) or not isinstance(self.auto_resume_s, (int, float))
+                or not math.isfinite(self.auto_resume_s) or self.auto_resume_s < 0):
+            raise ValueError("rover.auto_resume_s must be a finite nonnegative number or null")
+        # Opt-in: run the whole route again when it ends, up to max_loops runs in total.
+        self.repeat_route = self.cfg.get("repeat_route", False)
+        self.max_loops = self.cfg.get("max_loops", 1)
+        if not isinstance(self.repeat_route, bool):
+            raise ValueError("rover.repeat_route must be boolean")
+        if isinstance(self.max_loops, bool) or not isinstance(self.max_loops, int) or self.max_loops < 1:
+            raise ValueError("rover.max_loops must be an integer >= 1")
+        self._base_route = deepcopy(self.route)
+        self._loops = 1
+        self._review_at = None
         if self.audio_enabled:
             for key in ("verify_s", "max_age_s", "knock_window_s", "stop_timeout_s"):
                 value = self.audio_stop.get(key)
@@ -401,6 +417,11 @@ class Patrol:
 
     def _next_gap(self):
         self.gap_index += 1
+        if (self.gap_index == len(self.route) and self.repeat_route and not self.exploring
+                and self._loops < self.max_loops):
+            self._loops += 1
+            self.route.extend({"name": f"{gap['name']} {self._loops}", "moves": deepcopy(gap["moves"])}
+                              for gap in self._base_route)
         if self.gap_index == len(self.route):
             self._finish("DONE")
             return
@@ -518,6 +539,15 @@ class Patrol:
             return
         if self._gate_started is not None:
             self.engine.gate_until(math.inf)
+        if self.state != "REVIEW":
+            self._review_at = None
+        if self.state == "REVIEW" and self.auto_resume_s is not None:
+            if self._review_at is None:
+                self._review_at = t
+            elif t - self._review_at >= self.auto_resume_s and not self._dialog_busy():
+                self._review_at = None
+                generation = self._generation
+                self.pipeline.call_soon(lambda: self._resume(generation))
         if self.state == "STOPPING" and t >= self._deadline:
             self._audio_fault("STOP acknowledgement timed out; motion remains locked")
         elif self.state == "MOVING":
