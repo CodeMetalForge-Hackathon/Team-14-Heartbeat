@@ -46,3 +46,39 @@ another; only one process should own each serial device and the camera.
 
 No shared API contracts changed. The normal debris destination remains 3 cm
 with 0.5 cm tolerance; faults and uncertain scenes can still stop travel sooner.
+
+## Motor timeout diagnostics
+
+Following the operator's explicit tabletop/no-echo authorization, the repeated
+bounded step again timed out and the operator reported no movement or twitch.
+The firmware now preserves commanded PWM, encoder progress and Mega2560 output
+registers at an active movement deadline. It stops the motors before ADC sampling
+or serial printing. The existing `ERR guard_timeout` reason gains diagnostic
+fields; host parsing already preserves extended error text. Motion limits,
+missing-echo policy, watchdog and obstacle checks are unchanged.
+
+The diagnostic build passed the firmware checks, compiled to 26,394 bytes, and
+was uploaded with avrdude readback verification. The next single bounded test
+returned:
+
+```text
+ERR guard_timeout progress=0,0 target=53 pwm=-89,89 battery_adc=6 ocr=89,89 timer=129,131 ddr=176,47 dir=198
+```
+
+The PWM duty registers both held 89/255, both PWM output pins were configured
+as outputs, and the direction output bits matched the requested forward
+polarity. Encoder progress was zero before the host reconnected. These are MCU
+register observations, not electrical measurements at the motor terminals.
+STOP was acknowledged after the timeout.
+
+The battery ADC was 6/1023, corresponding to the existing nominal 0.09 V
+estimate. Earlier successful checks in `PI-CONNECTED-CHECK.md` recorded roughly
+7–8 V and completed this same step at 35% power. This strongly suggests a motor
+power-path problem, but does not establish which battery, connector, switch or
+board component is responsible. A battery-only power-light check was requested;
+the operator has not yet supplied its result. No successful motor motion has
+been established in these retries.
+
+Evidence: `runs/rover-flash-20261108/pwm-diagnostic.json` and
+`motor-diagnostic-upload.log`. The fresh live observation run is
+`runs/20261108-095838`; its dashboard is on port 8001. The live run is disarmed.

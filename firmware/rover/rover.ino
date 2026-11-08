@@ -135,6 +135,38 @@ void fail(const __FlashStringHelper *reason) {
   Serial.println(reason);
 }
 
+void failGuardTimeout() {
+  // Preserve evidence before STOP clears PWM and a host reconnect resets encoders.
+  long left, right;
+  snapshotEncoders(left, right);
+  const long leftProgress = (left - startLeft) * leftDirection;
+  const long rightProgress = (right - startRight) * rightDirection;
+  const int pwmLeft = static_cast<int>(leftPwm) * leftDirection;
+  const int pwmRight = static_cast<int>(rightPwm) * rightDirection;
+#if defined(__AVR_ATmega2560__)
+  const uint16_t duty1 = OCR1A;
+  const uint8_t duty2 = OCR2A;
+  const uint8_t timer1 = TCCR1A, timer2 = TCCR2A;
+  const uint8_t pwmOutputs = DDRB, directionOutputs = DDRL, directions = PORTL;
+#endif
+  stopMotors();  // Cut outputs before ADC conversion or serial printing.
+  const int batteryAdc = analogRead(BATTERY_PIN);
+  Serial.print(F("ERR guard_timeout progress=")); Serial.print(leftProgress);
+  Serial.print(','); Serial.print(rightProgress);
+  Serial.print(F(" target=")); Serial.print(targetPulses);
+  Serial.print(F(" pwm=")); Serial.print(pwmLeft);
+  Serial.print(','); Serial.print(pwmRight);
+  Serial.print(F(" battery_adc=")); Serial.print(batteryAdc);
+#if defined(__AVR_ATmega2560__)
+  // Auriga: PWM pins 11/10, direction pins 49/48/47/46.
+  Serial.print(F(" ocr=")); Serial.print(duty1); Serial.print(','); Serial.print(duty2);
+  Serial.print(F(" timer=")); Serial.print(timer1); Serial.print(','); Serial.print(timer2);
+  Serial.print(F(" ddr=")); Serial.print(pwmOutputs); Serial.print(','); Serial.print(directionOutputs);
+  Serial.print(F(" dir=")); Serial.print(directions);
+#endif
+  Serial.println();
+}
+
 void failStall(unsigned long now, long leftProgress, long rightProgress,
                bool leftStalled, bool rightStalled) {
   // Capture the last commanded PWM, then cut power BEFORE any serial output.
@@ -322,18 +354,18 @@ void startGuardedMove(bool isTurn, float amount, float speed, unsigned long maxM
 void updateGuardedRange() {
   if (!guardedMove || !moving) return;
   const unsigned long now = millis();
-  if (now - guardedStartMs >= guardedDurationMs) { fail(F("guard_timeout")); return; }
+  if (now - guardedStartMs >= guardedDurationMs) { failGuardTimeout(); return; }
   if (now - lastCommandMs >= WATCHDOG_MS) { fail(F("watchdog")); return; }
   if (now - guardedLastRangeMs < navigationPollMs) return;
   // Never start a potentially 24 ms echo acquisition across the short action
   // deadline. Stop early rather than extend motor output past that deadline.
   if (guardedDurationMs - (now - guardedStartMs) <= RANGE_TIMEOUT_US / 1000 + 1) {
-    fail(F("guard_timeout")); return;
+    failGuardTimeout(); return;
   }
   const float cm = readFrontCm(rangePort);
   guardedLastRangeMs = millis();
   if (guardedLastRangeMs - guardedStartMs >= guardedDurationMs) {
-    fail(F("guard_timeout")); return;
+    failGuardTimeout(); return;
   }
   if (cm < 0 && (guardedApproach || !guardedNoEcho)) { fail(F("range_unknown")); return; }
   if (guardedApproach && cm <= approachStopCm) {
@@ -618,7 +650,7 @@ float desiredPwm(long progress) {
 void updateMotion() {
   if (!moving) return;
   const unsigned long now = millis();
-  if (guardedMove && now - guardedStartMs >= guardedDurationMs) { fail(F("guard_timeout")); return; }
+  if (guardedMove && now - guardedStartMs >= guardedDurationMs) { failGuardTimeout(); return; }
   if (now - lastCommandMs >= WATCHDOG_MS) { fail(F("watchdog")); return; }
   if (now - moveStartMs >= MAX_MOVE_MS) { fail(F("move_timeout")); return; }
   long left, right;

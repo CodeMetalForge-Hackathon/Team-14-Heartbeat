@@ -132,6 +132,14 @@ int main(){
  assert(Serial.out.str().find("ERR watchdog")!=std::string::npos);
  reset();configure();command("APPROACH 2 35 1000 3");tick(1000);off();
  assert(Serial.out.str().find("ERR guard_timeout")!=std::string::npos);
+ // Preserve motion evidence at a deadline, while leaving both outputs stopped.
+ reset();configure();command("STEP 3 35 1000");
+ for(int i=0;i<40;i++)tick(20);
+ assert(leftMotor.pwm==-89 && rightMotor.pwm==89);
+ leftMotor.position=startLeft-2;rightMotor.position=startRight+3;
+ Serial.clear();tick(200);off();
+ assert(Serial.out.str().find("ERR guard_timeout progress=2,3 target=53 pwm=-89,89 battery_adc=512")==0);
+ assert(Serial.out.str().size()<256);
  reset();configure();command("APPROACH 2 35 2000 3");tick(1500);off();
  assert(Serial.out.str().find("ERR stall")!=std::string::npos);
  // Invalid approach distances, powers and targets are rejected stopped.
