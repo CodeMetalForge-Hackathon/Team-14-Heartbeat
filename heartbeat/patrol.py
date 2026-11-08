@@ -13,6 +13,7 @@ import threading
 import yaml
 
 from .onset import CLIP_SAMPLES, PRE_SAMPLES, SAMPLE_RATE
+from .rover import navigation_args
 
 
 # These are protocol/state contracts, rather than tunable timing values.
@@ -44,11 +45,11 @@ def load_route(route):
             if not isinstance(move, (list, tuple)) or len(move) != 2:
                 raise ValueError(f"{name}: each move requires a command and value")
             command, value = move
-            if command not in ("drive", "turn"):
+            if command not in ("drive", "turn", "explore"):
                 raise ValueError(f"{name}: unknown move {command!r}")
-            limit = 100 if command == "drive" else 180
+            limit = 600 if command == "explore" else (100 if command == "drive" else 180)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) or abs(value) > limit):
+                    or not math.isfinite(value) or abs(value) > limit or command == "explore" and value < 1):
                 raise ValueError(f"{name}: {command} must be within +/-{limit}")
             checked.append((command, float(value)))
         names.add(name)
@@ -80,6 +81,14 @@ class Patrol:
         self.audio_enabled = self.audio_stop.get("enabled", False)
         if not isinstance(self.audio_enabled, bool):
             raise ValueError("rover.audio_stop.enabled must be boolean")
+        self.trigger_mode = self.audio_stop.get("trigger_mode", "all")
+        self.scheduled_listen = self.audio_stop.get("scheduled_listen", True)
+        if self.trigger_mode not in {"all", "knocks"}:
+            raise ValueError("rover.audio_stop.trigger_mode must be all or knocks")
+        if not isinstance(self.scheduled_listen, bool):
+            raise ValueError("rover.audio_stop.scheduled_listen must be boolean")
+        if not self.scheduled_listen and not self.audio_enabled:
+            raise ValueError("Disabling scheduled listening requires audio_stop.enabled")
         if self.audio_enabled:
             for key in ("verify_s", "max_age_s", "knock_window_s", "stop_timeout_s"):
                 value = self.audio_stop.get(key)
@@ -87,8 +96,8 @@ class Patrol:
                         or not math.isfinite(value) or value <= 0):
                     raise ValueError(f"rover.audio_stop.{key} must be positive and finite")
             count = self.audio_stop.get("knock_count")
-            if isinstance(count, bool) or not isinstance(count, int) or count < 2:
-                raise ValueError("rover.audio_stop.knock_count must be an integer >= 2")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("rover.audio_stop.knock_count must be an integer >= 1")
         for key in ("settle_s", "gap_timeout_s", "speed_pct"):
             value = self.cfg[key]
             if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -102,6 +111,13 @@ class Patrol:
                     or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 255
                            for v in color)):
                 raise ValueError(f"rover.{key} must contain three integer RGB channels")
+        self.exploring = any(cmd == "explore" for gap in self.route for cmd, _ in gap["moves"])
+        if self.exploring:
+            if (len(self.route) != 1 or len(self.route[0]["moves"]) != 1
+                    or not self.audio_enabled or self.scheduled_listen):
+                raise ValueError("exploration needs one explore move and audio stops without scheduled listening")
+            navigation_args(self.cfg["navigation"])
+        self._explore_move = None
         self.results = []
         self.state = "IDLE"
         self.gap_index = -1
@@ -178,6 +194,8 @@ class Patrol:
         """
         data = event.data
         if event.type == "audio_observation":
+            if self.trigger_mode == "knocks":
+                return None
             if not data.get("possible_distress"):
                 return None
             if data.get("label") not in {"SCREAM", "SHOUT", "CRYING"} and not data.get("matched_phrases"):
@@ -397,11 +415,15 @@ class Patrol:
             return
         moves = self.route[self.gap_index]["moves"]
         if self._move_index >= len(moves):
-            self._submit("stop", (), "stopped")
+            self._submit("stop", (), "stopped" if self.scheduled_listen else "checkpoint")
             return
         command, value = moves[self._move_index]
         self._move_index += 1
-        self._submit(command, (value, self.cfg["speed_pct"]), "moved")
+        if command == "explore":
+            self._explore_move = (value, self.cfg["speed_pct"])
+            self._submit("configure_navigation", (self.cfg["navigation"],), "navigation_ready")
+        else:
+            self._submit(command, (value, self.cfg["speed_pct"]), "moved")
 
     def _submit(self, method, args, completion=None):
         generation = self._generation
@@ -427,7 +449,7 @@ class Patrol:
             generation, method, args, completion = job
             if generation != self._generation or self._closed:
                 continue
-            if method in ("drive", "turn") and not self.motion_allowed:
+            if method in ("drive", "turn", "explore") and not self.motion_allowed:
                 ok = False
             else:
                 try:
@@ -452,13 +474,24 @@ class Patrol:
             if isinstance(ok, dict):
                 self.battery = ok.get("batt", ok.get("battery"))
                 self._emit_state(self.state)
-        elif ok is not True and completion in ("moved", "stopped"):
+        elif ok is not True and completion in ("moved", "stopped", "checkpoint", "navigation_ready"):
             self._error("rover operation failed; patrol stopped")
             self._fail()
+        elif completion == "navigation_ready":
+            if self.motion_allowed:
+                self._submit("explore", self._explore_move, "moved")
         elif completion == "moved":
             self._next_move()
         elif completion == "stopped":
             self._begin_settle()
+        elif completion == "checkpoint":
+            # Queue advancement rather than recursively walking empty gaps.
+            # A candidate or operator STOP can invalidate this callback first.
+            self.pipeline.call_soon(lambda: self._advance_checkpoint(generation))
+
+    def _advance_checkpoint(self, generation):
+        if generation == self._generation and self.motion_allowed:
+            self._next_gap()
 
     def _begin_settle(self):
         self._deadline = self.pipeline.t + self.cfg["settle_s"]
@@ -627,6 +660,9 @@ class Patrol:
             # The result is tied to the actual stopped position. Never replay
             # the remainder of an interrupted move with an unknown distance.
             self._paused_phase = None
+            if self.exploring:
+                self.route.append({"name": f"Explore {len(self.route) + 1}",
+                                   "moves": list(self.route[0]["moves"])})
             self._next_gap()
             return
         if self.gap_index < 0:
@@ -686,7 +722,7 @@ def prepare_patrol_simulation(profile, route, *, bus=None, run_dir=None, argv=No
     drain_budget += planner.duration(PromptKnocks(max(profile.dialog["patterns"]),
                                                 profile.dialog["interval_s"]))
     # A timed-out gap still lets its physical/virtual prompt finish before moving.
-    travel = sum(abs(value) / (cfg["fake_speed_cm_s"] if command == "drive"
+    travel = sum(value if command == "explore" else abs(value) / (cfg["fake_speed_cm_s"] if command == "drive"
                              else cfg["fake_turn_deg_s"])
                  * cfg["default_speed_pct"] / cfg["speed_pct"]
                  for gap in route for command, value in gap["moves"])

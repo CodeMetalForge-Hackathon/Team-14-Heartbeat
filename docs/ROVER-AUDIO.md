@@ -114,3 +114,124 @@ Hardware-free checks:
 uv run pytest -q tests/test_patrol.py tests/test_patrol_audio.py tests/test_audio_monitor.py
 uv run pytest -q
 ```
+
+
+## Stop to investigate knocks only
+
+Use `--profile clap-knocks` instead of `clap-distress` for the patrol. This
+profile is compatible with the existing CLAP distress service on port 8767;
+the service does not need restarting. Restart the patrol process to load it.
+For a fresh service, use `--profile profiles/clap-knocks.yaml` on the service too.
+
+One accepted knock classification requests STOP, followed by the usual
+two-second settle, eight-second verification, and operator review. Further
+accepted stationary knocks can initiate the existing challenge-response dialog.
+The classification cutoff is unchanged. This detects knock-like impacts, not
+necessarily human knocks; test motor noise and bumps on the actual rover.
+
+Vocal monitoring is disabled in the patrol client. Screams, speech, breathing,
+and help phrases do not trigger this mode. Route checkpoints advance without
+scheduled listening or review pauses. The bounded drive/turn commands still
+finish between segments, and the rover stops at the end of the route. Operator
+pause/E-STOP, communication faults, and firmware protections remain active.
+Fixed-route mode does not repeat automatically or read the ultrasonic sensor.
+Use the explicit exploration mode below for front-obstacle navigation.
+
+Human-operated command (Mac example):
+
+```bash
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --route profiles/route.yaml --knocker manual --dashboard --port 8001
+```
+
+After a knock investigation, Resume skips the interrupted route leg as before;
+it does not replay an unknown remaining distance.
+
+
+## Autonomous local exploration (ultrasonic port 6)
+
+`--explore` replaces the fixed route with bounded, reactive front-obstacle
+navigation. The confirmed wiring on this Ranger is ultrasonic **port 6**, line
+sensor **port 9**. The line sensor is unused. Port 6 returned a valid distance
+after port 10 returned unknown; the reason for the original unknown is not established.
+The firmware's positive DRIVE direction is now mapped toward the ultrasonic
+sensor on this assembly. After uploading, test `drive 5 --speed 30` and verify
+actual forward travel before starting exploration. Encoder signs change together
+with motor direction; positive turns retain their previous motor mapping. This mode provides no GPS position,
+map, coverage guarantee, or return-to-start function. It cannot detect stairs,
+drops, side/rear obstacles, or every reflective/absorbent surface. Start on a
+level, unobstructed supervised test area with cable slack and access to STOP.
+
+Upload the updated `firmware/rover` first, using the build/upload instructions in
+its README. NAVCFG now includes the recovery timeout and valid-reading count;
+older firmware/settings are rejected and patrol remains stopped. Update both
+the host code and flashed sketch before testing this version.
+The straight-drive constant-power experiment is now part of this firmware.
+Exploration turns also retain their requested power until encoder completion;
+startup slew, target tolerance, stall guard and watchdog remain active. Actual
+turn angles and coasting distance need testing before autonomous operation.
+
+First exit patrol (Ctrl+C) and measure a stationary target at two distances:
+
+```bash
+uv run hb rover --port /dev/cu.usbserial-1130 range --sensor-port 6
+```
+
+Place a flat target around 20 cm ahead, then farther away and rerun. Check that
+`cm` changes plausibly and `valid=1`. `cm=-1 valid=0` means no usable echo, which
+can also occur in open space beyond sensor range. Do not start until this check
+works. RANGE never starts the motors; do not run another serial owner beside it.
+
+Leave the CLAP service running with `profiles/clap-knocks.yaml`. Then run:
+
+```bash
+uv run hb patrol --rover /dev/cu.usbserial-1130 --device stick --profile clap-knocks --explore --sensor-port 6 --explore-seconds 120 --knocker manual --dashboard --port 8001
+```
+
+The rover waits 200 ms, measures in front, and starts continuous forward travel
+only with at least 45 cm clearance. The 20 cm encoder checkpoints roll forward
+without stopping the motors, restarting their ramp, or emitting repeated
+`NAV FORWARD` lines. They retain bounded progress/deadline checks; a wheel that
+passes a checkpoint is still monitored for stalls while the other catches up.
+Front readings use an 80 ms poll interval plus the bounded echo acquisition time.
+A reading at/below 30 cm cuts motor power before requesting a turn. It then waits
+and turns 45 degrees in place, repeating until a reading permits forward travel.
+Eight unsuccessful turns produce a stopped `navigation_blocked` error. A front
+obstacle closer than 15 cm prevents even a turn (`obstacle_too_close`).
+
+A missing echo immediately cuts motor power and reports `NAV SENSOR_WAIT`.
+The controller retries while stopped for up to 800 ms, allowing 200 ms to settle.
+It requires two consecutive valid readings agreeing on whether forward clearance
+exists. A missing reading or a change between open/blocked resets that agreement.
+`NAV SENSOR_READY` reports recovery, then the fresh distance determines forward
+travel, a search turn, or a too-close stop. Restart uses the normal gradual ramp.
+If recovery fails, `range_unknown` aborts. STOP, a knock-triggered STOP, watchdog,
+and exploration expiry cancel recovery; later echoes cannot restart it. These
+settings are `range_retry_ms` and `range_good_reads` in YAML. Front range is not
+used to assess side clearance during a turn.
+
+All these parameters live under `rover.navigation` in the profile and are sent
+to the controller before movement. Firmware rejects values outside fixed bounds.
+Echo acquisition is limited to 24 ms, so a disconnected sensor cannot block the
+controller's serial/stop loop for the library's default long timeout.
+
+Console `NAV FORWARD`, `NAV OBSTACLE` and `NAV TURN` lines include front distance
+and are recorded as `rover` events. CLAP keeps capturing in parallel. A classified
+knock cancels exploration, then follows SETTLING → VERIFYING → dialog → REVIEW.
+Resume after review starts a fresh exploration period at the current location.
+The two-minute default ends with motors off and DONE; it is not an endless loop.
+`--explore-seconds` supports 1–600 seconds. Pause, abort, E-STOP, serial faults,
+stall protection and the communication watchdog remain active. `--knocker manual`
+still requires an operator to deliver the printed challenge prompts.
+
+Software-only checks (the dry run simulates elapsed exploration, not geometry):
+
+```bash
+uv run hb patrol --dry-run --profile clap-knocks --explore --explore-seconds 2
+uv run pytest -q tests/test_navigation.py
+python3 tools/check_rover_firmware.py
+```
+
+The C++ harness needs a C++17 compiler and supports `--compiler` and `--sysroot`
+for local toolchain setup. It compiles the actual sketch against fake I/O and
+exercises obstacles, unknown range, search limits, STOP, watchdog, stalls, and
+completion. These checks do not validate physical obstacle detection or braking.

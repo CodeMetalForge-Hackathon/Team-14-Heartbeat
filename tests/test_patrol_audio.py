@@ -307,9 +307,72 @@ def test_full_scripted_demo_holds_and_resumes_without_models():
 
 
 @pytest.mark.parametrize("change", [{"verify_s": 0}, {"max_age_s": float("nan")},
-                                     {"knock_count": 1}, {"enabled": "yes"}])
+                                     {"knock_count": 0}, {"enabled": "yes"}])
 def test_bad_audio_control_configuration_is_rejected(setup, change):
     pipeline, patrol, _, _ = setup
     cfg = {**patrol.cfg, "audio_stop": {**patrol.audio_stop, **change}}
     with pytest.raises(ValueError, match="audio_stop"):
         Patrol(patrol.rover, pipeline, patrol.engine, SimpleNamespace(), patrol.route, cfg)
+
+
+def test_knocks_only_profile_preserves_model_contract():
+    base = load_profile("clap-distress").classifier
+    knocks = load_profile("clap-knocks")
+    assert knocks.rover["audio_stop"]["knock_count"] == 1
+    assert not knocks.rover["audio_stop"]["scheduled_listen"]
+    assert not knocks.classifier.clap["monitor"]["enabled"]
+    assert knocks.classifier.threshold == base.threshold
+    for key in ("endpoint", "model", "revision", "positive_prompts", "negative_prompts"):
+        assert knocks.classifier.clap[key] == base.clap[key]
+
+
+def test_knocks_only_ignores_vocals_and_stops_on_one_classified_knock(setup):
+    pipeline, patrol, _, _ = setup
+    patrol.trigger_mode = "knocks"
+    patrol.audio_stop["knock_count"] = 1
+    pipeline.step(3.1)
+    for label in ("SCREAM", "SHOUT", "CRYING", "SPEECH", "BREATHING"):
+        observation(pipeline, 3.1, label=label)
+    pipeline.bus.publish("audio_observation", 3.1, start=.1, label="SPEECH", score=.9,
+                         possible_distress=True, matched_phrases=["help"], transcript="help")
+    assert patrol.state == "MOVING"
+    pipeline.bus.publish("sound", 2.2, is_knock=False, gated=True, score=.5, classifier="clap")
+    assert patrol.state == "MOVING"
+    pipeline.bus.publish("sound", 2.2, is_knock=True, gated=True, score=.9, classifier="clap")
+    assert patrol.state == "STOPPING" and patrol._trigger["label"] == "KNOCK_BURST"
+    pipeline.step(3.2)
+    assert patrol.state == "SETTLING" and not pipeline.stopped
+
+
+def test_no_scheduled_listening_crosses_route_then_stops_at_end(setup):
+    pipeline, patrol, commands, events = setup
+    patrol.scheduled_listen = False
+    pipeline.step(5.1)  # Finish the first 100 cm fake leg.
+    pipeline.step(5.2)  # Advance through the empty second gap and end the route.
+    assert patrol.state == "DONE" and not patrol.rover.moving
+    assert not patrol.results and "challenge" not in commands
+    assert not any(e.type == "patrol" and e.data["state"] in
+                   {"SETTLING", "VERIFYING", "LISTENING", "REVIEW"} for e in events)
+
+
+def test_knock_stop_invalidates_queued_checkpoint_advancement(setup):
+    pipeline, patrol, _, _ = setup
+    patrol.scheduled_listen = False
+    patrol.trigger_mode = "knocks"
+    patrol.audio_stop["knock_count"] = 1
+    pipeline.step(5.1)
+    assert pipeline.messages  # Completion queued next gap, but not applied yet.
+    pipeline.bus.publish("sound", 4.1, is_knock=True, gated=True, score=.9, classifier="clap")
+    pipeline.step(5.2)
+    assert patrol.gap_name == "A" and patrol.state == "SETTLING"
+    assert patrol._trigger["label"] == "KNOCK_BURST"
+
+
+def test_checkpoint_stop_failure_cannot_advance_route(setup):
+    pipeline, patrol, _, _ = setup
+    patrol.scheduled_listen = False
+    patrol.rover.stop = lambda: False
+    pipeline.step(5.1)
+    pipeline.step(5.2)
+    assert patrol.done and patrol.gap_name == "A"
+    assert patrol.state in {"ABORTED", "ESTOP"}

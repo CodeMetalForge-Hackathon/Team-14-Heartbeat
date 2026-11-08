@@ -32,6 +32,13 @@ Use the actual port shown by `board list`; a Pi usually uses `/dev/ttyUSB0` or
 `/dev/ttyACM0`. Uploading or opening USB serial may reset the Auriga. The sketch
 boots with motor output zero, the ring off, and exactly `READY rover v1`.
 
+The host retries identity PING on the same connection every 0.25 seconds, up
+to a five-second startup deadline (`rover.connect_retry_s` and
+`rover.connect_timeout_s`). This tolerates the AVR bootloader discarding an
+early request after USB opens. Only `PONG rover v1` completes the handshake;
+READY alone, silence, or another firmware's identity never authorizes a move.
+Movement commands are not retried automatically.
+
 For first movement checks, support the chassis with the tracks off the ground.
 Keep its power switch accessible. Check `ping`, `status`, `stop`, and a small
 movement before placing it on a flat test surface. The motor battery supply must
@@ -58,8 +65,11 @@ numbers, non-ASCII bytes, and lines longer than 95 characters are rejected.
 | --- | --- |
 | boot | `READY rover v1` |
 | `PING` | `PONG rover v1` |
-| `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached; negative distance reverses |
-| `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached; in-place turn |
+| `RANGE <port>` | `RANGE port=<port> cm=<distance> valid=<0/1>`; stationary only |
+| `NAVCFG <port> <stop_cm> <clear_cm> <step_cm> <turn_deg> <max_turns> <poll_ms> <settle_ms> <turn_clearance_cm> <range_retry_ms> <range_good_reads>` | `OK NAVCFG ...`; validated settings, stationary only, RAM only |
+| `EXPLORE <seconds> <speed_pct>` | `OK EXPLORE <seconds>` only when the bounded period ends; STOP cancels it |
+| `DRIVE <cm> <speed_pct>` | `OK DRIVE <cm>` after both encoder targets are reached within tolerance; negative distance reverses |
+| `TURN <deg> <speed_pct>` | `OK TURN <deg>` after both encoder targets are reached within tolerance; in-place turn |
 | `STOP` | `OK STOP`, after immediately setting both motor outputs to zero |
 | `HB` | No reply; refreshes the movement watchdog |
 | `STATUS` | `STATUS batt=<V> moving=<0/1> enc=<left>,<right>` |
@@ -88,8 +98,12 @@ smaller than one encoder pulse returns `ERR resolution`.
 Makeblock's firmware. Verify it against a multimeter; it is not a calibrated
 measurement. `enc` reports signed wheel/output-shaft degrees since boot, rounded
 to whole degrees, in native SLOT1/SLOT2 directions. Positive driving runs SLOT1
-positive and SLOT2 negative. Positive turns run both slots positive. The physical
-forward and turn directions still need checking on the actual assembly.
+negative and SLOT2 positive, toward this assembled Ranger's ultrasonic sensor.
+This corrects the observed backward movement with the prior mapping.
+`DRIVE_FORWARD_POLARITY` is the firmware's mechanical orientation constant.
+Negative drives reverse both directions. Positive turns still run both slots
+positive. Check a short forward move after uploading before enabling exploration;
+turn direction and angles still need checking on the actual assembly.
 
 ## Calibration
 
@@ -134,17 +148,31 @@ write produces `ERR eeprom` and leaves motor output zero.
 
 The sketch uses the official `MeEncoderOnBoard` direct PWM API and encoder
 interrupts. It takes atomic snapshots of the AVR's 32-bit pulse counters and
-stops each wheel independently at its measured target. It does not hold position
-with PID after a move. Normal output rises at a bounded rate and decreases
-through the final quarter of encoder travel. A friction floor capped by the
-requested speed keeps the final approach finite; each target still cuts output
-immediately. This is a simple motion ramp, not closed-loop matched wheel speed.
+stops each wheel independently at its measured target for bounded moves. It does not hold position
+with PID after a move. Normal output rises at a bounded rate. Straight drives and exploration turns
+retain requested power through the final approach: the earlier distance slowdown
+caused observed low-PWM stalls. Standalone TURN keeps its original slowdown.
+Each encoder target cuts output independently within the bounded tolerance.
+This controls PWM, not closed-loop matched wheel speed; test turn accuracy and
+coasting distance after changing power behavior.
+
+Movement completion permits at most **two encoder pulses** of shortfall per
+motor, additionally capped at **1% of the requested pulse target**, rounded down.
+Targets below 100 pulses still require exact completion. This avoids a false
+stall when a nearly finished motor cannot overcome track friction at the final
+low PWM. At the fallback calibration, two pulses correspond to roughly 1.13 mm
+of commanded straight travel; this is encoder tolerance, not a claim of physical
+distance accuracy. Both motors must independently enter tolerance before success.
+A motor outside tolerance still has the same stall/watchdog/deadline protections.
 
 The following are fixed firmware safety bounds or board facts, rather than route
 tunables: the command ceilings, 20 ms control interval, 240 PWM units/second slew
 bound, 25 PWM-unit friction floor from Makeblock's `PWM_MIN_OFFSET`, 1.5 second
 communication watchdog, 1.5 second per-wheel encoder stall guard, and 30 second
-absolute move deadline. A wrong encoder direction beyond two pulses also stops
+absolute move/checkpoint deadline. During continuous exploration, the deadline
+renews only after both wheels actually pass an encoder checkpoint; the per-wheel
+stall timers never reset merely because a checkpoint rolled over. A wrong
+encoder direction beyond two pulses also stops
 the move. The host profile chooses speed and calibration within these bounds;
 it can apply stricter limits.
 
@@ -154,13 +182,50 @@ produces `ERR stall`. A move exceeding 30 seconds, even with heartbeats, produce
 Malformed commands also stop an active move before reporting their error.
 The serial parser handles at most 64 bytes per iteration, so incoming data cannot
 indefinitely prevent the motion watchdog from running. No movement code waits
-for a target or sleeps.
+for an encoder target or sleeps. Opt-in ultrasonic sampling has an explicit
+24 ms pulse timeout and a 12 microsecond trigger pulse.
 
 `OK STOP` means motor output is disabled; it does not prove the chassis has
 finished coasting. The host must allow debris and the chassis to settle before
 opening detection. This USB watchdog is software protection, not a physical
 emergency power disconnect. Humans must verify stopping distance, motor wiring,
 direction, encoder operation, wheel slip, and the watchdog with the real rover.
+
+## Tracing a motor stall
+
+Updated firmware includes a diagnostic snapshot in the existing ERR reply:
+
+```text
+ERR stall slots=1 progress=163,177 target=177 pwm=29,0 idle_ms=1500,1540 elapsed_ms=3012
+```
+
+This is an illustrative example, not a measurement from the robot. Both motor
+outputs are disabled before printing. The 1.5-second stall limit and movement
+power settings are unchanged. Reflash the updated sketch to receive these fields;
+an old sketch continues to report only `ERR stall`.
+
+- `slots`: unfinished motor slots whose encoder stopped changing (1, 2, or both).
+- `progress`: SLOT1,SLOT2 encoder pulses since this movement began, normalized
+  to the requested direction. These are not centimeters or absolute positions.
+- `target`: required pulse count for each motor.
+- `pwm`: last commanded signed PWM for SLOT1,SLOT2, on a -255 to 255 scale.
+  This is commanded power, not measured torque/current. A completed motor has 0.
+- `idle_ms`: time since each encoder last changed. A completed motor can have a
+  large idle time without being stalled; use `slots` and `progress` together.
+- `elapsed_ms`: controller time since this move began, not the audio stream clock.
+
+Close patrol before a standalone test so only one process owns the serial port.
+On an unobstructed test surface, a human can capture a short movement:
+
+```bash
+uv run hb rover --port /dev/cu.YOUR_RANGER drive 10 --speed 30 2>&1 | tee /tmp/rover-drive-trace.log
+```
+
+The same detailed error is printed and recorded in `events.jsonl` during patrol.
+Progress near target with low PWM suggests the final approach may not overcome
+track friction. Zero progress on a motor needs a power/wiring/mechanical/encoder
+check. Encoder counts cannot distinguish a physically stuck motor from a failed
+encoder; observe the tracks as well. Do not infer a cause from `stall` alone.
 
 ## Sources and validation
 
@@ -173,16 +238,43 @@ API and wiring references were inspected at official Makeblock commit
 - [Onboard LED ring example](https://github.com/Makeblock-official/Makeblock-Libraries/blob/21b20bbd55bbaaaae6ac14a4580d0a238c8bbd4d/examples/Me_RGBLed/MeAurigaOnBoardLEDRing/MeAurigaOnBoardLEDRing.ino): 12 LEDs on D44.
 - [Auriga firmware](https://github.com/Makeblock-official/Makeblock-Libraries/blob/21b20bbd55bbaaaae6ac14a4580d0a238c8bbd4d/examples/Firmware_for_Auriga/Firmware_for_Auriga.ino): A4 battery conversion.
 
-On 2026-11-07 this development machine had arduino-cli 1.5.1 and Arduino AVR core
-1.8.8, but no Makeblock library. No toolchain/library was installed and no target
-compile, upload, serial connection, or physical motion was attempted. A native
-C++ harness compiled the actual sketch against fake serial, encoder, ring, and
-EEPROM APIs with AddressSanitizer and UndefinedBehaviorSanitizer. It checked
-protocol replies, EEPROM persistence/corruption, strict numeric parsing and
-2,000 malformed-input cases, motion limits, signed moves, ramping, independent
-wheel completion, STOP priority/cancellation, heartbeat expiry, stall handling,
-and the absolute deadline. This does not replace the target compile or hardware
-checks above.
+The updated sketch compiled for `arduino:avr:mega:cpu=atmega2560` with Arduino
+AVR core 1.8.8 and the pinned Makeblock library. `tools/check_rover_firmware.py`
+compiles this same sketch against fake Arduino I/O with address/undefined-behavior
+sanitizers and exercises navigation and stop guards without hardware. No
+autonomous navigation upload or physical run was performed by the coding agent.
+
+For the installed Makeblock library, `dot_a_linkage=true` in its
+`library.properties` is needed to avoid linking unused MegaPi globals alongside
+Auriga globals. The local test toolchain uses that archive-link setting.
+
+## Autonomous exploration
+
+See [ROVER-AUDIO](../../docs/ROVER-AUDIO.md#autonomous-local-exploration-ultrasonic-port-6)
+for sensor validation and the CLAP exploration command. Navigation configuration
+comes from YAML through NAVCFG; there is no movement or retained navigation mode
+on boot. Ports 6–10 are accepted; the user's ultrasonic sensor is now on 6. Port 9's
+line sensor is not used. EXPLORE requires configuration and lasts 1–600 seconds.
+It emits `NAV FORWARD <cm>`, `NAV TURN <cm>`, and `NAV OBSTACLE <cm>` progress lines.
+Forward exploration now rolls encoder checkpoints without cutting motor power;
+turns still finish and settle before a fresh front reading. Internal movement
+does not emit completion acknowledgements. STOP cancels
+the entire exploration transaction and prevents a delayed OK EXPLORE reply.
+
+Unknown echo, blocked search, overly close front obstacle, motor stall, wrong
+encoder direction and lost heartbeat all disable outputs. Unknown echo enters a
+bounded motor-off retry (`NAV SENSOR_WAIT -1`) instead of immediately aborting.
+Two agreeing valid readings (profile default) produce `NAV SENSOR_READY <cm>`;
+the fresh distance then determines forward/turn/too-close behavior. Invalid
+readings reset recovery agreement, never its deadline. Expiry produces
+`ERR range_unknown`. STOP/heartbeat loss/overall expiry cancel recovery.
+
+NAVCFG has eleven arguments; its last two settings are the retry duration
+(200–5000 ms) and required valid-reading count (2–5). The retry duration must
+exceed settling plus poll time for all required readings plus the 24 ms echo
+timeout. Host and firmware enforce the same bounds. Older nine-argument NAVCFG
+is rejected so a partial upgrade cannot enable incompatible motion behavior.
+The front sensor does not establish side clearance during turns or detect drops.
 
 ## Restore the Ranger's original firmware
 

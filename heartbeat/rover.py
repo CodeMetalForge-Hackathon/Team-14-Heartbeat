@@ -19,12 +19,40 @@ from .stickmic import canonical_port, claim_port, new_serial_connection, release
 
 
 MAX_REPLY_BYTES = 256  # Fixed framing bound, not a motion tuning parameter.
+MAX_GUARDED_MS = 2000  # Controller protocol ceiling, not a route tuning value.
+GUARDED_COMMANDS = {"STEP", "PIVOT"}
+MOTION_COMMANDS = {"DRIVE", "TURN", "EXPLORE", *GUARDED_COMMANDS}
+DATA_COMMANDS = {"STATUS", "RANGE", "CAPS"}
 
 
 def _finite(value, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError(f"{name} must be finite")
     return float(value)
+
+
+NAVIGATION_KEYS = ("sensor_port", "stop_cm", "clear_cm", "step_cm", "turn_deg",
+                   "max_turns", "poll_ms", "settle_ms", "turn_clearance_cm",
+                   "range_retry_ms", "range_good_reads")
+
+
+def navigation_args(settings):
+    """Validate the same physical bounds as the controller, before opening USB."""
+    try:
+        values = tuple(_finite(settings[key], key) for key in NAVIGATION_KEYS)
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Missing rover navigation settings") from exc
+    port, stop, clear, step, turn, tries, poll, settle, clearance, retry, good = values
+    if (port not in range(6, 11) or not 20 <= stop <= 100 or not stop + 5 <= clear <= 200
+            or not 1 <= step <= 30 or not 15 <= turn <= 90
+            or not tries.is_integer() or not 1 <= tries <= 16
+            or not poll.is_integer() or not 60 <= poll <= 200
+            or not settle.is_integer() or not 100 <= settle <= 1000
+            or not 5 <= clearance < stop or not retry.is_integer() or not 200 <= retry <= 5000
+            or not good.is_integer() or not 2 <= good <= 5
+            or retry <= settle + poll * good + 24):
+        raise ValueError("Invalid rover navigation settings")
+    return values
 
 
 def parse_reply(line: str | bytes) -> dict:
@@ -46,9 +74,14 @@ def parse_reply(line: str | bytes) -> dict:
         return {"kind": kind, "device": "rover", "version": "v1", "raw": raw}
     if kind == "ERR" and len(words) > 1:
         return {"kind": "ERR", "reason": " ".join(words[1:]), "raw": raw}
+    if kind == "CAPS":
+        if len(words) != 2 or words[1] not in {"guarded=0", "guarded=1"}:
+            raise ValueError("Invalid rover capabilities")
+        return {"kind": "CAPS", "guarded": words[1] == "guarded=1", "raw": raw}
     if kind == "OK" and len(words) >= 2:
         command = words[1]
-        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "LED": 3, "CAL": 2}
+        counts = {"STOP": 0, "DRIVE": 1, "TURN": 1, "EXPLORE": 1,
+                  "STEP": 3, "PIVOT": 3, "NAVCFG": 11, "LED": 3, "CAL": 2}
         if command not in counts or len(words) != counts[command] + 2:
             raise ValueError(f"Malformed rover acknowledgement: {raw}")
         try:
@@ -57,9 +90,36 @@ def parse_reply(line: str | bytes) -> dict:
             raise ValueError(f"Malformed rover acknowledgement: {raw}") from exc
         if not all(math.isfinite(arg) for arg in args):
             raise ValueError("Nonfinite rover acknowledgement")
+        if command in GUARDED_COMMANDS:
+            amount, speed, max_ms = args
+            if (not (0 < amount <= 100 if command == "STEP" else 0 < abs(amount) <= 180)
+                    or not 1 <= speed <= 60 or not max_ms.is_integer()
+                    or not 1 <= max_ms <= MAX_GUARDED_MS):
+                raise ValueError("Malformed guarded movement acknowledgement")
+        if command == "NAVCFG":
+            navigation_args(dict(zip(NAVIGATION_KEYS, args)))
         if command == "LED" and any(not arg.is_integer() or not 0 <= arg <= 255 for arg in args):
             raise ValueError("Malformed rover LED acknowledgement")
         return {"kind": "OK", "command": command, "args": args, "raw": raw}
+    if kind == "NAV" and len(words) == 3:
+        cm = float(words[2])
+        valid_distance = cm == -1 if words[1] == "SENSOR_WAIT" else 2 <= cm <= 400
+        if (words[1] not in {"FORWARD", "TURN", "OBSTACLE", "SENSOR_WAIT", "SENSOR_READY"}
+                or not math.isfinite(cm) or not valid_distance):
+            raise ValueError("Invalid navigation observation")
+        return {"kind": "NAV", "state": words[1], "cm": cm, "raw": raw}
+    if kind == "RANGE" and len(words) == 4:
+        values = dict(word.split("=", 1) for word in words[1:])
+        if values.keys() != {"port", "cm", "valid"}:
+            raise ValueError("Invalid range fields")
+        port, cm = int(values["port"]), float(values["cm"])
+        if (port not in range(6, 11) or values["valid"] not in {"0", "1"}
+                or not math.isfinite(cm)
+                or (values["valid"] == "1" and not 2 <= cm <= 400)
+                or (values["valid"] == "0" and cm != -1)):
+            raise ValueError("Invalid range reading")
+        return {"kind": "RANGE", "port": port, "cm": cm,
+                "valid": values["valid"] == "1", "raw": raw}
     if kind == "STATUS" and len(words) == 4:
         try:
             values = dict(word.split("=", 1) for word in words[1:])
@@ -82,6 +142,7 @@ class RoverConfig:
     read_timeout_s: float
     write_timeout_s: float
     connect_timeout_s: float
+    connect_retry_s: float
     boot_timeout_s: float
     boot_ping_interval_s: float
     command_timeout_s: float
@@ -149,21 +210,31 @@ class _Commands:
             self.bus.publish("error", self.clock(), source="rover", message=str(message), command=command)
 
     def _validate(self, command: str, args: tuple) -> tuple:
-        count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0,
-                 "DRIVE": 2, "TURN": 2, "LED": 3, "CAL": 2}
+        count = {"PING": 0, "STOP": 0, "HB": 0, "STATUS": 0, "CAPS": 0,
+                 "DRIVE": 2, "TURN": 2, "EXPLORE": 2, "STEP": 3, "PIVOT": 3,
+                 "NAVCFG": 11, "RANGE": 1, "LED": 3, "CAL": 2}
         if command not in count or len(args) != count[command]:
             raise ValueError("Invalid rover command")
         numbers = tuple(_finite(value, command) for value in args)
-        if command in {"DRIVE", "TURN"}:
-            bound = self.cfg.max_drive_cm if command == "DRIVE" else self.cfg.max_turn_deg
-            if not -bound <= numbers[0] <= bound:
+        if command in MOTION_COMMANDS:
+            bound = 600 if command == "EXPLORE" else (self.cfg.max_drive_cm if command in {"DRIVE", "STEP"} else self.cfg.max_turn_deg)
+            if not (1 if command == "EXPLORE" else -bound) <= numbers[0] <= bound:
                 raise ValueError(f"{command} exceeds host distance/angle limit")
+            if command in GUARDED_COMMANDS:
+                if numbers[0] == 0 or command == "STEP" and numbers[0] < 0:
+                    raise ValueError("Guarded STEP requires forward travel; PIVOT requires a nonzero angle")
+                if not numbers[2].is_integer() or not 1 <= numbers[2] <= MAX_GUARDED_MS:
+                    raise ValueError("Guarded movement deadline must be an integer from 1 through 2000 ms")
             if not 1 <= numbers[1] <= self.cfg.max_speed_pct:
                 raise ValueError("Rover speed must be between 1 and the profile limit")
             if self.estopped:
                 raise ValueError("Rover E-STOP is latched; explicit reset_estop is required")
             if self.engine_is_listening():
                 raise ValueError("Rover movement refused while sentinel is listening")
+        if command == "NAVCFG":
+            navigation_args(dict(zip(NAVIGATION_KEYS, numbers)))
+        if command == "RANGE" and numbers[0] not in range(6, 11):
+            raise ValueError("Ultrasonic sensor port must be 6 through 10")
         if command == "LED" and any(not value.is_integer() or not 0 <= value <= 255 for value in numbers):
             raise ValueError("Rover LED channels must be integers from 0 to 255")
         if command == "CAL" and any(not self.cfg.calibration_min <= v <= self.cfg.calibration_max for v in numbers):
@@ -175,6 +246,26 @@ class _Commands:
 
     def turn(self, deg, speed_pct=None):
         return self._command("TURN", (deg, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+
+    def step(self, cm, speed_pct, max_ms):
+        """Forward encoder move with local range checks and a firmware deadline."""
+        return self._command("STEP", (cm, speed_pct, max_ms))
+
+    def pivot(self, deg, speed_pct, max_ms):
+        """Signed encoder turn with local front-range checks and a deadline."""
+        return self._command("PIVOT", (deg, speed_pct, max_ms))
+
+    def capabilities(self):
+        return self._command("CAPS", ())
+
+    def configure_navigation(self, settings):
+        return self._command("NAVCFG", navigation_args(settings))
+
+    def explore(self, seconds, speed_pct=None):
+        return self._command("EXPLORE", (seconds, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+
+    def range(self, sensor_port):
+        return self._command("RANGE", (sensor_port,))
 
     def ping(self):
         return self._command("PING", ())
@@ -215,7 +306,11 @@ class _Pending:
             return reply["kind"] == "PONG"
         if self.command == "STATUS":
             return reply["kind"] == "STATUS"
-        expected = self.args[:1] if self.command in {"DRIVE", "TURN"} else self.args
+        if self.command == "RANGE":
+            return reply["kind"] == "RANGE" and reply["port"] == self.args[0]
+        if self.command == "CAPS":
+            return reply["kind"] == "CAPS"
+        expected = self.args[:1] if self.command in {"DRIVE", "TURN", "EXPLORE"} else self.args
         return (reply["kind"] == "OK" and reply["command"] == self.command
                 and len(reply["args"]) == len(expected)
                 and all(math.isclose(a, b, rel_tol=1e-5, abs_tol=1e-5)
@@ -240,6 +335,8 @@ class RoverLink(_Commands):
         self._claim_key = None
         self._reader = None
         self._fault = None
+        self._capabilities = None
+        self._capabilities_connection = None
         self._pending = None
         self._stop_pending = None
         self._lock = threading.RLock()
@@ -259,8 +356,12 @@ class RoverLink(_Commands):
                 self._validate(command, args)
                 if epoch is not None and epoch != self._stop_epoch:
                     raise ValueError("Rover command cancelled by STOP")
-                if command in {"DRIVE", "TURN"} and self._stopping.is_set():
+                if command in MOTION_COMMANDS and self._stopping.is_set():
                     raise ValueError("Rover movement cancelled by STOP")
+                if command in GUARDED_COMMANDS and (
+                        self._capabilities_connection is not connection
+                        or not (self._capabilities or {}).get("guarded")):
+                    raise ValueError("Rover firmware has not advertised guarded movement")
                 if command == "HB" and not self.moving:
                     return
                 if connection is not self._connection:
@@ -365,6 +466,8 @@ class RoverLink(_Commands):
                 )
                 self._connection = connection
                 self._fault = None
+                self._capabilities = None
+                self._capabilities_connection = None
                 # Drop old buffered completions before the identity barrier.
                 reset = getattr(connection, "reset_input_buffer", None)
                 if reset is not None:
@@ -437,20 +540,41 @@ class RoverLink(_Commands):
                 self._connect()
                 if epoch != self._stop_epoch:
                     raise ValueError("Rover command cancelled by STOP")
-                motion = command in {"DRIVE", "TURN"}
+                connection = self._connection
+                if command in GUARDED_COMMANDS:
+                    # Probe each new connection. An old sketch must never fall
+                    # back to DRIVE/TURN, which have no ultrasonic guard.
+                    if self._capabilities_connection is not connection:
+                        capabilities = self._perform("CAPS", (), self.cfg.command_timeout_s, epoch=epoch)
+                        with self._lock:
+                            if epoch != self._stop_epoch or connection is not self._connection:
+                                raise ValueError("Rover capability probe cancelled by STOP")
+                            self._capabilities = capabilities
+                            self._capabilities_connection = connection
+                    if not (self._capabilities or {}).get("guarded"):
+                        raise ValueError("Rover firmware does not support guarded movement")
+                motion = command in MOTION_COMMANDS
                 if motion:
                     self.moving = True
                     self._heartbeat_cancel = threading.Event()
                     threading.Thread(target=self._heartbeat, args=(self._connection, self._heartbeat_cancel), daemon=True,
                                      name="rover-heartbeat").start()
                 try:
-                    reply = self._perform(command, args, self.cfg.move_timeout_s if motion else self.cfg.command_timeout_s,
+                    timeout = (args[2] / 1000.0 + self.cfg.command_timeout_s if command in GUARDED_COMMANDS else
+                               args[0] + self.cfg.command_timeout_s if command == "EXPLORE" else
+                               self.cfg.move_timeout_s if motion else self.cfg.command_timeout_s)
+                    reply = self._perform(command, args, timeout,
                                           epoch=epoch)
                 finally:
                     if motion:
                         self.moving = False
                         self._heartbeat_cancel.set()
-                return reply if command == "STATUS" else reply is not None
+                if command == "CAPS":
+                    with self._lock:
+                        if epoch == self._stop_epoch and connection is self._connection:
+                            self._capabilities = reply
+                            self._capabilities_connection = connection
+                return reply if command in DATA_COMMANDS else reply is not None
         except Exception as exc:
             self._error(exc, command=command)
             # Invalid requests do not touch hardware. A transport fault or a
@@ -461,7 +585,7 @@ class RoverLink(_Commands):
                 else:
                     self._stopping.clear()
                 self._disconnect()
-            return None if command == "STATUS" else False
+            return None if command in DATA_COMMANDS else False
 
     def stop(self):
         """Send STOP without acquiring the command lock, aborting a move waiter."""
@@ -493,6 +617,8 @@ class RoverLink(_Commands):
         with self._lock:
             connection, self._connection = self._connection, None
             key, self._claim_key = self._claim_key, None
+            self._capabilities = None
+            self._capabilities_connection = None
             self.moving = False
             self._heartbeat_cancel.set()
         if connection is not None:
@@ -537,6 +663,8 @@ class FakeRover(_Commands):
     def duration(self, command, value, speed_pct=None):
         command = command.upper()
         args = self._validate(command, (value, self.cfg.default_speed_pct if speed_pct is None else speed_pct))
+        if command == "EXPLORE":
+            return args[0]
         rate = self.cfg.fake_speed_cm_s if command == "DRIVE" else self.cfg.fake_turn_deg_s
         return abs(args[0]) / rate * self.cfg.default_speed_pct / args[1]
 
@@ -546,24 +674,30 @@ class FakeRover(_Commands):
         try:
             args = self._validate(command, args)
             with self._lock:
-                if self.moving and command in {"DRIVE", "TURN", "CAL", "LED"}:
+                if command in GUARDED_COMMANDS:
+                    raise ValueError("Fake rover does not model guarded sensor/encoder movement")
+                if self.moving and command in {"DRIVE", "TURN", "EXPLORE", "NAVCFG", "RANGE", "CAL", "LED"}:
                     raise ValueError("Fake rover is busy")
                 item = {"t": self.clock(), "command": command, "args": list(args)}
                 self.trace.append(item)
                 epoch = self._stop_epoch
-                if command in {"DRIVE", "TURN"}:
+                if command in {"DRIVE", "TURN", "EXPLORE"}:
                     self._finish_t = self.clock() + self.duration(command, *args)
                     self._motion = (command, args)
                     self.moving = True
                 self._emit("command", command=command, args=list(args))
-                if command in {"DRIVE", "TURN"}:
+                if command in {"DRIVE", "TURN", "EXPLORE"}:
                     return self._stop_epoch == epoch and self.moving
                 reply = {"kind": "STATUS", "batt": None, "moving": self.moving, "enc": [0, 0]} if command == "STATUS" else {"kind": "OK", "command": command, "args": list(args)}
+                if command == "CAPS":
+                    reply = {"kind": "CAPS", "guarded": False, "simulated": True}
+                if command == "RANGE":
+                    reply = {"kind": "RANGE", "port": int(args[0]), "cm": 100.0, "valid": True, "simulated": True}
                 self._emit("reply", reply=reply)
-                return reply if command == "STATUS" else True
+                return reply if command in DATA_COMMANDS else True
         except (ValueError, TypeError) as exc:
             self._error(exc, command=command)
-            return None if command == "STATUS" else False
+            return None if command in DATA_COMMANDS else False
 
     def advance(self, t):
         t = _finite(t, "stream time")

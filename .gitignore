@@ -8,3 +8,6 @@ data/clips/
 models/*.tflite
 .DS_Store
 dist/
+
+# Local OpenAI credentials; never commit.
+.env.local
