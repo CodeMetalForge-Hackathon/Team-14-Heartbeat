@@ -27,6 +27,7 @@ const float MAX_CALIBRATION = 100000.0f;
 const unsigned long WATCHDOG_MS = 1500;
 const unsigned long STALL_MS = 1500;
 const unsigned long MAX_MOVE_MS = 30000;
+const unsigned long MAX_GUARDED_MS = 2000;  // Fixed one-shot protocol ceiling.
 const unsigned long CONTROL_MS = 20;
 const float PWM_SLEW_PER_S = 240.0f;  // Fixed maximum rise/fall rate for ordinary moves.
 // Fixed completion-error ceilings: two encoder pulses AND at most 1% of a move.
@@ -64,6 +65,9 @@ uint8_t lineLength = 0;
 bool discardLine = false;
 bool moving = false;
 bool turning = false;
+bool guardedMove = false;
+unsigned long guardedStartMs = 0, guardedDurationMs = 0, guardedLastRangeMs = 0;
+char guardedArgs[MAX_LINE + 1];
 char moveValue[MAX_LINE + 1];
 long startLeft = 0, startRight = 0, targetPulses = 0;
 long previousLeft = 0, previousRight = 0;
@@ -113,6 +117,7 @@ void stopMotors() {
   rightMotor.setMotorPwm(0);
   moving = false;
   exploring = false;
+  guardedMove = false;  // STOP/faults cancel the entire one-shot transaction.
   leftPwm = rightPwm = 0.0f;
 }
 
@@ -272,6 +277,50 @@ float readFrontCm(uint8_t port) {
   return echo && cm >= 2.0f && cm <= 400.0f ? cm : -1.0f;
 }
 
+void startGuardedMove(bool isTurn, float amount, float speed, unsigned long maxMs,
+                      const char *amountText, const char *speedText, const char *maxText) {
+  if (moving || exploring) { fail(F("busy")); return; }
+  if (!navigationConfigured) { fail(F("navigation_not_configured")); return; }
+  const unsigned long started = millis();
+  // Always acquire fresh evidence on the MCU; host/camera observations cannot
+  // authorize a stale range. Invalid echo fails stopped, with no auto-restart.
+  const float cm = readFrontCm(rangePort);
+  if (cm < 0) { fail(F("range_unknown")); return; }
+  if (cm < (isTurn ? navigationTurnClearanceCm : navigationClearCm)) {
+    fail(F("obstacle_too_close")); return;
+  }
+  if (millis() - started >= maxMs) { fail(F("guard_timeout")); return; }
+  startMove(isTurn, amount, speed, amountText);
+  if (!moving) return;  // Resolution/calibration failure has already stopped.
+  guardedMove = true;
+  guardedStartMs = started; guardedDurationMs = maxMs;
+  guardedLastRangeMs = millis();
+  // Exact accepted tokens improve host correlation without float reformatting.
+  snprintf(guardedArgs, sizeof(guardedArgs), "%s %s %s", amountText, speedText, maxText);
+}
+
+void updateGuardedRange() {
+  if (!guardedMove || !moving) return;
+  const unsigned long now = millis();
+  if (now - guardedStartMs >= guardedDurationMs) { fail(F("guard_timeout")); return; }
+  if (now - lastCommandMs >= WATCHDOG_MS) { fail(F("watchdog")); return; }
+  if (now - guardedLastRangeMs < navigationPollMs) return;
+  // Never start a potentially 24 ms echo acquisition across the short action
+  // deadline. Stop early rather than extend motor output past that deadline.
+  if (guardedDurationMs - (now - guardedStartMs) <= RANGE_TIMEOUT_US / 1000 + 1) {
+    fail(F("guard_timeout")); return;
+  }
+  const float cm = readFrontCm(rangePort);
+  guardedLastRangeMs = millis();
+  if (guardedLastRangeMs - guardedStartMs >= guardedDurationMs) {
+    fail(F("guard_timeout")); return;
+  }
+  if (cm < 0) { fail(F("range_unknown")); return; }
+  if (turning ? cm < navigationTurnClearanceCm : cm <= navigationStopCm) {
+    fail(F("obstacle_too_close")); return;
+  }
+}
+
 void navigationEvent(const __FlashStringHelper *state, float cm) {
   Serial.print(F("NAV ")); Serial.print(state); Serial.print(' '); Serial.println(cm, 2);
 }
@@ -364,6 +413,9 @@ void handleLine(char *line) {
   } else if (strcmp(command, "PING") == 0 && count == 1) {
     lastCommandMs = millis();
     Serial.println(F("PONG rover v1"));
+  } else if (strcmp(command, "CAPS") == 0 && count == 1) {
+    lastCommandMs = millis();
+    Serial.println(F("CAPS guarded=1"));
   } else if (strcmp(command, "STATUS") == 0 && count == 1) {
     lastCommandMs = millis();
     sendStatus();
@@ -412,6 +464,18 @@ void handleLine(char *line) {
     navigationSpeed = speed; navigationDurationMs = static_cast<unsigned long>(seconds * 1000);
     navigationStartMs = navigationWaitMs = lastCommandMs = millis();
     navigationTurns = 0; navigationPhase = NAV_WAIT; exploring = true;
+  } else if ((strcmp(command, "STEP") == 0 || strcmp(command, "PIVOT") == 0) && count == 4) {
+    float amount, speed, maxMs;
+    if (!parseNumber(tokens[1], amount) || !parseNumber(tokens[2], speed) ||
+        !parseNumber(tokens[3], maxMs)) { fail(F("number")); return; }
+    const bool isTurn = strcmp(command, "PIVOT") == 0;
+    if (amount == 0 || (!isTurn && amount < 0) ||
+        fabsf(amount) > (isTurn ? MAX_TURN_DEG : MAX_DRIVE_CM) ||
+        speed < 1 || speed > MAX_SPEED_PCT || maxMs < 1 || maxMs > MAX_GUARDED_MS ||
+        maxMs != floorf(maxMs)) { fail(F("limit")); return; }
+    lastCommandMs = millis();
+    startGuardedMove(isTurn, amount, speed, static_cast<unsigned long>(maxMs),
+                     tokens[1], tokens[2], tokens[3]);
   } else if ((strcmp(command, "DRIVE") == 0 || strcmp(command, "TURN") == 0) && count == 3) {
     float amount, speed;
     if (!parseNumber(tokens[1], amount) || !parseNumber(tokens[2], speed)) {
@@ -499,6 +563,7 @@ float desiredPwm(long progress) {
 void updateMotion() {
   if (!moving) return;
   const unsigned long now = millis();
+  if (guardedMove && now - guardedStartMs >= guardedDurationMs) { fail(F("guard_timeout")); return; }
   if (now - lastCommandMs >= WATCHDOG_MS) { fail(F("watchdog")); return; }
   if (now - moveStartMs >= MAX_MOVE_MS) { fail(F("move_timeout")); return; }
   long left, right;
@@ -525,9 +590,15 @@ void updateMotion() {
       exploring = true; navigationPhase = NAV_WAIT; navigationWaitMs = millis();
       return;  // Internal segments never acknowledge the outer EXPLORE command.
     }
+    const bool completedGuarded = guardedMove;
     stopMotors();
-    Serial.print(turning ? F("OK TURN ") : F("OK DRIVE "));
-    Serial.println(moveValue);
+    if (completedGuarded) {
+      Serial.print(turning ? F("OK PIVOT ") : F("OK STEP "));
+      Serial.println(guardedArgs);
+    } else {
+      Serial.print(turning ? F("OK TURN ") : F("OK DRIVE "));
+      Serial.println(moveValue);
+    }
     return;
   }
   const bool leftStalled = !leftDone && now - leftProgressMs >= STALL_MS;
@@ -574,6 +645,7 @@ void setup() {
 void loop() {
   // Parse serial before motor updates: STOP cancels a pending completion reply.
   pollSerial();
+  updateGuardedRange();
   updateNavigation();
   updateMotion();
 }

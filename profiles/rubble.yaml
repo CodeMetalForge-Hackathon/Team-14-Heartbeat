@@ -519,6 +519,90 @@ rover:
     duration_s: 120
   # Motor speed percent for route legs.
   speed_pct: 30
+  decisions:
+    # Mission evidence goes to the model; movement bounds below remain local.
+    mission: "Inspect the immediate area slowly for possible people or places worth listening. Choose STOP_AND_LISTEN for possible human cues. No response never means nobody is there."
+    # Total navigation budget; active audio verification/dialog can finish afterward.
+    session_s: 120
+    # Reject an observation this old at the actual motion dispatch, in seconds.
+    observation_max_age_s: 2.5
+    # Minimum interval between observation requests, in seconds.
+    decision_interval_s: 0.5
+    # Motor-off delay before collecting the next camera frame, in seconds.
+    action_settle_s: 0.25
+    # Pause before refreshing a HOLD or unexecuted proposal, in seconds.
+    hold_s: 0.5
+    # Model score threshold for a proposed movement; not a safety probability.
+    min_confidence: 0.7
+    # Fixed distance assigned to FORWARD_SHORT, in centimeters.
+    forward_cm: 3.0
+    # Fixed absolute angle assigned to either turn choice, in degrees.
+    turn_deg: 10.0
+    # Fixed motor speed for guarded Decisions actions; cannot be set by the model.
+    speed_pct: 25
+    # Firmware stops and fails if both encoder targets are not reached by this deadline.
+    max_action_ms: 1000
+    # Assumed mounting convention; verify physically before opting into --allow-turns.
+    positive_turn_is_right: true
+    # Maximum controller worker shutdown wait, in seconds.
+    worker_join_s: 3.0
+    # Number of recent action outcomes supplied as navigation context.
+    history_size: 8
+    # API transport timeout; camera/API errors leave the rover stopped for review.
+    read_timeout_s: 1.5
+    # Image/webcam preview timeout; separate from the live movement freshness budget.
+    preview_timeout_s: 15.0
+    webcam_preview:
+      # Separate local-only page so the existing rover dashboard can keep port 8001.
+      port: 8002
+      # Browser snapshot width in pixels; the live preview is resized before upload.
+      width: 640
+      # Browser snapshot height in pixels.
+      height: 480
+      # Browser JPEG encoding quality greater than 0 and at most 1.
+      jpeg_quality: 0.8
+      # Bound incoming JSON, including base64 JPEG and example sensor values.
+      max_request_bytes: 1500000
+      # Seconds allowed for pending web requests during server shutdown.
+      shutdown_timeout_s: 3
+    # Maximum accepted API response bytes; oversized responses cannot produce movement.
+    max_response_bytes: 65536
+    # Maximum JPEG input bytes; match the camera frame limit below.
+    max_frame_bytes: 1048576
+    # Image detail sent to Decisions; increase if important scene details are lost.
+    image_detail: low
+    # Numeric tolerance when validating the returned choice-probability sum.
+    probability_sum_tolerance: 0.02
+    action_descriptions:
+      # Local distance and speed bounds are never inferred from image text.
+      FORWARD_SHORT: "Advance one short forward step toward useful inspection, only if forward is offered."
+      # Turning is offered only when the operator enables it and front clearance permits it.
+      TURN_LEFT_SHORT: "Turn slightly left to inspect another direction; do not claim side clearance from a front photo."
+      # This is the same bounded local primitive in the opposite direction.
+      TURN_RIGHT_SHORT: "Turn slightly right to inspect another direction; do not claim side clearance from a front photo."
+      # Starts deterministic stationary audio verification, never confirms a survivor by itself.
+      STOP_AND_LISTEN: "Stop and verify possible human signals using the existing audio procedure."
+      # Always available when images, sensors, progress, or the situation are ambiguous.
+      HOLD: "Stay stopped and obtain a fresh observation."
+    camera:
+      # Raspberry Pi OS camera application; a path can be supplied by --camera-command.
+      command: rpicam-vid
+      # Camera frame width in pixels; frames are sent only for Decisions requests.
+      width: 640
+      # Camera frame height in pixels.
+      height: 480
+      # Local MJPEG capture rate; the controller sends selected fresh frames only.
+      fps: 5
+      # Maximum wait for a fresh complete frame, in seconds.
+      frame_timeout_s: 3.0
+      # Bound both retained JPEG size and parsing buffers.
+      max_frame_bytes: 1048576
+      # Maximum wait before forcibly ending a camera process during shutdown.
+      shutdown_timeout_s: 1.0
+      # Cancellation polling interval while waiting for a new frame, in seconds.
+      cancel_poll_s: 0.05
+      # Maximum bytes read per MJPEG pipe operation; keeps parsing memory bounded.
+      stream_read_bytes: 65536
   # Stop the audio pipeline after the final patrol result.
   stop_on_done: true
   # The only gap with a simulated survivor in the hardware-free patrol.

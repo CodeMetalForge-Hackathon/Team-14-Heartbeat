@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import asyncio
 from dataclasses import replace
 from datetime import datetime
@@ -111,6 +112,15 @@ def _parser() -> argparse.ArgumentParser:
     replay.add_argument("--classifier")
     report = commands.add_parser("report", help="write a session after-action report")
     report.add_argument("run_dir", type=Path)
+    preview = commands.add_parser("decisions-preview", help="preview Decisions from a JPEG or browser webcam; no rover or audio control")
+    preview_source = preview.add_mutually_exclusive_group(required=True)
+    preview_source.add_argument("--image", type=Path, help="saved JPEG to send to the API")
+    preview_source.add_argument("--webcam", action="store_true", help="serve a local browser webcam preview; each capture sends one frame")
+    preview.add_argument("--front-cm", type=_positive_float, required=True, help="example front distance, not a live sensor reading (2–400 cm)")
+    preview.add_argument("--allow-turns", action="store_true", help="include hypothetical left/right choices; never executes movement")
+    preview.add_argument("--timeout", type=_positive_float, help="API socket timeout; defaults to the profile preview timeout")
+    preview.add_argument("--port", type=int, help="local webcam page port; default from the profile")
+    preview.add_argument("--profile", default="rubble")
     rover = commands.add_parser("rover", help="control the Ranger link; a human runs motor commands")
     rover.add_argument("--port", required=True, help="rover USB serial port")
     rover.add_argument("--profile", default="rubble")
@@ -133,9 +143,15 @@ def _parser() -> argparse.ArgumentParser:
     patrol.add_argument("--speaker-device", type=_device)
     patrol.add_argument("--route", type=Path, default=Path("profiles/route.yaml"))
     patrol.add_argument("--profile", default="rubble")
-    patrol.add_argument("--explore", action="store_true", help="navigate using front ultrasonic sensing instead of a fixed route")
+    navigation = patrol.add_mutually_exclusive_group()
+    navigation.add_argument("--explore", action="store_true", help="navigate using front ultrasonic sensing instead of a fixed route")
+    navigation.add_argument("--decisions", action="store_true", help="use camera + Decisions API action choices; motors disabled unless --arm-motion")
     patrol.add_argument("--sensor-port", type=int, choices=range(6, 11))
     patrol.add_argument("--explore-seconds", type=_positive_float, help="bounded exploration duration per start/resume (max 600)")
+    patrol.add_argument("--decisions-seconds", type=_positive_float, help="total Decisions navigation budget (max 600 seconds)")
+    patrol.add_argument("--camera-command", help="rpicam-vid executable path for --decisions")
+    patrol.add_argument("--arm-motion", action="store_true", help="allow guarded Decisions movement after hardware readiness is verified")
+    patrol.add_argument("--allow-turns", action="store_true", help="offer left/right choices after verifying turn direction and side clearance")
     patrol.add_argument("--dry-run", action="store_true", help="fake rover and simulated survivor; no hardware")
     patrol.add_argument("--dashboard", action="store_true")
     patrol.add_argument("--host")
@@ -410,6 +426,12 @@ class _DialogConsole:
                     f"NAV {reply['state']} · front {reply['cm']:.1f} cm")
         elif event.type == "patrol_cue":
             text = f"ROVER {data['phase']}: {data['label']} at {data['end']:.2f}s"
+        elif event.type == "decision":
+            text = f"DECISION {data.get('action', data.get('last_action', 'HOLD'))}"
+            if isinstance(data.get("latency_s"), (int, float)):
+                text += f" · API {data['latency_s']:.2f}s"
+            if data.get("reason"):
+                text += f" · {data['reason']}"
         elif event.type == "round_result":
             text = (f"round {data['round']}: expected {data['expected']}, heard {data['heard']}  "
                     f"{'match' if data['matched'] else 'no match'}  {data['odds']}")
@@ -617,6 +639,62 @@ def _rover(args, profile, bus) -> int:
         link.close()
 
 
+def _decisions_preview(args, profile) -> int:
+    """Preview saved or browser-captured imagery with example telemetry and no actuation."""
+    from .camera import CameraFrame
+    from .decisions import DecisionsClient
+
+    if not 2 <= args.front_cm <= 400:
+        raise ValueError("--front-cm must be an example distance between 2 and 400 cm")
+    settings = dict(profile.rover["decisions"])
+    settings["read_timeout_s"] = (args.timeout if args.timeout is not None
+                                  else settings["preview_timeout_s"])
+    if args.webcam:
+        from .webcam_preview import run_webcam_preview
+
+        run_webcam_preview(settings, profile.rover["navigation"], front_cm=args.front_cm,
+                           allow_turns=args.allow_turns, port=args.port)
+        return 0
+    if args.port is not None:
+        raise ValueError("--port requires --webcam")
+    limit = settings["max_frame_bytes"]
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 4:
+        raise ValueError("rover.decisions.max_frame_bytes must be an integer >= 4")
+    with args.image.expanduser().open("rb") as image_file:
+        jpeg = image_file.read(limit + 1)
+    if len(jpeg) > limit:
+        raise ValueError("Image exceeds the profile byte limit; export a smaller JPEG")
+    if not jpeg.startswith(b"\xff\xd8") or not jpeg.endswith(b"\xff\xd9"):
+        raise ValueError("--image must be a JPEG; export PNG/HEIC images as JPEG first")
+    navigation = profile.rover["navigation"]
+    choices = ["HOLD", "STOP_AND_LISTEN"]
+    if args.front_cm >= navigation["clear_cm"]:
+        choices.append("FORWARD_SHORT")
+    if args.allow_turns and args.front_cm >= navigation["turn_clearance_cm"]:
+        choices.extend(["TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"])
+    telemetry = {
+        "mode": "saved_image_preview", "image_source": "saved_jpeg",
+        "image_capture_time_known": False, "sensor_source": "operator_supplied_example",
+        "front_cm": args.front_cm, "moving": False, "armed": False,
+        "allow_turns": args.allow_turns, "clear_cm": navigation["clear_cm"],
+        "turn_clearance_cm": navigation["turn_clearance_cm"], "steps": 0, "history": [],
+    }
+    # Receipt time marks file loading only; this preview never authorizes motion.
+    frame = CameraFrame(jpeg, time.monotonic(), 1)
+    client = DecisionsClient(settings)
+    try:
+        result = client.choose(frame, telemetry, choices)
+    finally:
+        client.close()
+    print(json.dumps({
+        "mode": "saved_image_preview", "sensor_source": "operator_supplied_example",
+        "example_front_cm": args.front_cm, "motion_executed": False,
+        "action": result.action, "confidence": result.confidence,
+        "probabilities": dict(result.probabilities), "api_latency_s": result.latency_s,
+    }, indent=2, allow_nan=False))
+    return 0
+
+
 def _patrol_input(patrol) -> None:
     commands = {"p": "pause", "r": "resume", "q": "abort", "e": "estop", " ": "estop"}
     try:
@@ -638,7 +716,14 @@ def _patrol(args, profile, bus) -> int:
     from .prompter import make_prompter
     from .rover import RoverLink
 
-    if args.explore:
+    if not args.decisions and (args.arm_motion or args.allow_turns
+                               or args.camera_command or args.decisions_seconds is not None):
+        raise ValueError("--arm-motion, --allow-turns, --camera-command and --decisions-seconds require --decisions")
+    if args.decisions and args.dry_run:
+        raise ValueError("--decisions uses real camera/API observations; omit --arm-motion for observation mode, not --dry-run")
+    if args.explore_seconds is not None and not args.explore:
+        raise ValueError("--explore-seconds requires --explore")
+    if args.explore or args.decisions:
         navigation = dict(profile.rover["navigation"])
         if args.sensor_port is not None:
             navigation["sensor_port"] = args.sensor_port
@@ -646,12 +731,12 @@ def _patrol(args, profile, bus) -> int:
         from .rover import navigation_args
         navigation_args(navigation)
         if not profile.rover["audio_stop"]["enabled"] or profile.rover["audio_stop"]["scheduled_listen"]:
-            raise ValueError("Use --profile clap-knocks for exploration with audio stops")
+            raise ValueError("Use --profile clap-knocks for navigation with audio stops")
         profile = replace(profile, rover={**profile.rover, "navigation": navigation})
-        route = load_route([{"name": "Explore 1", "moves": [["explore", duration]]}])
+        route = load_route([{"name": "Explore 1", "moves": [["explore", duration]]}]) if args.explore else None
     else:
         if args.sensor_port is not None or args.explore_seconds is not None:
-            raise ValueError("--sensor-port and --explore-seconds require --explore")
+            raise ValueError("--sensor-port requires --explore or --decisions")
         route = load_route(args.route)
     if not args.dry_run and not args.rover:
         raise ValueError("--rover is required unless --dry-run is selected")
@@ -661,8 +746,24 @@ def _patrol(args, profile, bus) -> int:
     errors = []
     bus.subscribe(lambda event: errors.append(event) if event.type == "error"
                   and event.data.get("severity") != "warning" else None)
-    runtime = controller = rover = None
+    runtime = controller = rover = camera = client = None
     try:
+        if args.decisions:
+            from .camera import RpicamCamera
+            from .decisions import DecisionsClient
+            from .decision_patrol import DecisionsPatrol, validate_decision_settings
+
+            settings = dict(profile.rover["decisions"])
+            settings["camera"] = dict(settings["camera"])
+            if args.decisions_seconds is not None:
+                settings["session_s"] = args.decisions_seconds
+            if args.camera_command:
+                settings["camera"]["command"] = args.camera_command
+            validate_decision_settings(settings)
+            profile = replace(profile, rover=dict(profile.rover, decisions=settings))
+            # Configuration and credentials fail before any serial/audio device opens.
+            client = DecisionsClient(settings)
+            camera = RpicamCamera(settings["camera"])
         directory = _run_directory(args, profile)
         if args.dry_run:
             if args.explore:
@@ -693,8 +794,16 @@ def _patrol(args, profile, bus) -> int:
 
             runtime = prepare_runtime(profile, source_factory, prompter_factory, bus=bus,
                                       run_dir=directory, argv=args._argv, rng_seed=args.seed)
-            controller = Patrol(rover, runtime.pipeline, runtime.session, runtime.session.prompter,
-                                route, profile.rover)
+            if args.decisions:
+                controller = DecisionsPatrol(
+                    rover, runtime.pipeline, runtime.session, runtime.session.prompter,
+                    profile.rover, client=client, camera=camera,
+                    arm_motion=args.arm_motion, allow_turns=args.allow_turns)
+                print("Decisions mode: " + ("guarded motion enabled" if args.arm_motion else
+                                            "OBSERVATION ONLY; motor actions are not executed"))
+            else:
+                controller = Patrol(rover, runtime.pipeline, runtime.session, runtime.session.prompter,
+                                    route, profile.rover)
             runtime.on_close.extend([controller.close, rover.close])
             if isinstance(runtime.pipeline.source, StickMicSource):
                 sink = StickStatusSink(runtime.pipeline.source)
@@ -712,12 +821,18 @@ def _patrol(args, profile, bus) -> int:
             runtime.pipeline.join()
     finally:
         # STOP precedes source/prompt/recording shutdown, including Ctrl-C.
-        if controller is not None and not controller.done:
-            controller.command("estop")
-        if runtime is not None:
-            runtime.close()
-        if rover is not None:
-            rover.close()
+        # Every resource is attempted even if an earlier shutdown raises.
+        with ExitStack() as cleanup:
+            if client is not None:
+                cleanup.callback(client.close)
+            if camera is not None:
+                cleanup.callback(camera.close)
+            if rover is not None:
+                cleanup.callback(rover.close)
+            if runtime is not None:
+                cleanup.callback(runtime.close)
+            if controller is not None and not controller.done:
+                cleanup.callback(controller.command, "estop")
     print("Gap | Status | Odds | Answers")
     for result in controller.results:
         position = " (position unverified)" if result.get("arrival_unverified") else ""
@@ -752,6 +867,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"matched {result['matched']}, missing {result['missing']}, new {result['new']}")
             return 0
         profile = load_profile(args.profile)
+        if args.command == "decisions-preview":
+            return _decisions_preview(args, profile)
         if args.command == "stick":
             return _stick(args, profile, bus)
         if args.command == "rover":

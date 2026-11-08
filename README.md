@@ -33,6 +33,8 @@ Replace `1` with the input device index shown by `hb devices`, or omit `--device
 
 All operational settings and synthetic sound parameters are in `profiles/rubble.yaml`, with comments describing each value. `--profile` accepts a name or YAML path; custom profiles inherit omitted rubble settings, reject unknown defined keys, and preserve the reserved `dialog`, `prompter`, and `server` dictionaries for later stages.
 
+For Raspberry Pi camera observations and bounded rover actions selected through the OpenAI Decisions API, see [Decisions rover setup](docs/DECISIONS.md). `hb patrol --decisions` starts with movement disabled; the existing audio verification and operator controls remain active.
+
 `AudioSource` yields 256-sample `AudioBlock(t0, x)` hops (the last file hop may be shorter). Audio is float32, mono, and within [-1, 1]. Stream time is derived from sample counts. The detector filters with a stateful second-order high-pass, estimates a rolling percentile noise floor, and emits each onset after its 15,600-sample raw-audio clip is available. Clips begin 100 ms before the detected onset, with zeros where a file boundary has no audio. Peak measures the first 50 ms of raw audio after the onset. Gates mark self-generated sounds without hiding them from the log.
 
 The detector requires the SNR threshold, minimum level, and refractory interval. It also re-arms only after SNR falls below `onset.rearm_db` (6 dB by default) or the level falls below `min_dbfs`. This hysteresis is an explicit refinement of P01's trigger conditions to meet its double-hit requirement: a ringing tail must not become another onset when the refractory interval expires. The shared audio, detection, and event contracts are unchanged.
