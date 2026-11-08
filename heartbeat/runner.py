@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 import time
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 
 class Pipeline:
@@ -38,6 +39,32 @@ class Pipeline:
         self._close_lock = threading.Lock()
         self._closed = False
         self._messages: queue.Queue[Callable[[], Any]] = queue.Queue()
+        # Offline files/simulations remain synchronous and deterministic. Live
+        # CLAP requests run independently of the source/detector processing loop.
+        from .audio import WavSource
+        offline = ((isinstance(source, WavSource) and not source.realtime)
+                   or (isinstance(source, SimulationSource) and not source._realtime))
+        self._async_inference = bool(getattr(classifier, "async_inference", False)) and not offline
+        self._inference = None
+        self._pending_inference = deque()
+        self.inference_failed = False
+        self._monitor = None
+        monitor_cfg = getattr(classifier, "settings", {}).get("monitor")
+        if monitor_cfg and monitor_cfg["enabled"]:
+            from .audio_monitor import AudioMonitor
+            self._monitor = AudioMonitor(classifier, bus, monitor_cfg, profile.prompter["gate_tail_s"])
+            self.on_audio.append(self._monitor.feed)
+
+    @property
+    def detection_watermark(self):
+        """Last stream time for which all possible classifications are known."""
+        from .onset import CLIP_SAMPLES, PRE_SAMPLES, SAMPLE_RATE
+        watermark = self.t - (CLIP_SAMPLES - PRE_SAMPLES) / SAMPLE_RATE
+        if self._pending_inference:
+            # Strictly before the oldest outstanding impact, so a knock exactly
+            # on a window deadline is delivered before that window can close.
+            watermark = min(watermark, self._pending_inference[0][0].t - 1 / SAMPLE_RATE)
+        return max(0.0, watermark)
 
     def call_soon(self, fn: Callable[[], Any]) -> None:
         """Queue a mutation for the processing thread's next block boundary."""
@@ -122,11 +149,29 @@ class Pipeline:
                 self._error(name, exc)
 
     def _sound(self, onset) -> None:
+        if getattr(self.classifier, "name", None) == "clap" and self._stop.is_set():
+            return
+        if self._async_inference:
+            self._poll_inference()
+            if self._stop.is_set():
+                return
+            if len(self._pending_inference) >= self.classifier.max_pending:
+                self._fail_inference(RuntimeError("CLAP request queue is full; listening stopped"))
+                return
+            future = self._inference.submit(self.classifier.classify, onset)
+            self._pending_inference.append((onset, future))
+            return
         try:
             det = self.classifier.classify(onset)
         except Exception as exc:
+            if getattr(self.classifier, "name", None) == "clap":
+                self._fail_inference(exc)
+                return
             self._error("classifier", exc)
             return
+        self._publish_detection(det)
+
+    def _publish_detection(self, det) -> None:
         self.bus.publish(
             "sound",
             float(det.t),
@@ -143,11 +188,41 @@ class Pipeline:
         )
         self._call_hooks(self.on_sound, det, "on_sound")
 
+    def _fail_inference(self, exc):
+        if not self.inference_failed:
+            self.inference_failed = True
+            self._error("classifier", exc)
+        for _, future in self._pending_inference:
+            future.cancel()
+        self._pending_inference.clear()
+        self.stop()
+
+    def _poll_inference(self, *, wait=False):
+        while self._pending_inference and not self._stop.is_set():
+            onset, future = self._pending_inference[0]
+            # Live deadlines use sample time; request timeouts independently
+            # bound network stalls, including at EOF when sample time stops.
+            if self.t - onset.t > self.classifier.max_lag_s:
+                self._fail_inference(RuntimeError("CLAP result exceeded maximum audio lag; listening stopped"))
+                return
+            if not wait and not future.done():
+                return
+            try:
+                det = future.result(timeout=self.classifier.max_lag_s if wait else 0)
+            except Exception as exc:
+                self._fail_inference(exc)
+                return
+            self._pending_inference.popleft()
+            if not self._stop.is_set():
+                self._publish_detection(det)
+
     def _process(self) -> None:
         sample_rate = self.profile.audio.sample_rate
         level_hz = self.profile.audio.level_hz
         next_level = 0
         self.bus.publish("session_start", self.t)
+        if self._async_inference:
+            self._inference = ThreadPoolExecutor(max_workers=1, thread_name_prefix="heartbeat-classifier")
         try:
             for block in self.source:
                 self._drain_messages()
@@ -164,6 +239,11 @@ class Pipeline:
                     onsets = []
                 for onset in onsets:
                     self._sound(onset)
+                self._poll_inference()
+                if self.inference_failed:
+                    break
+                if self._monitor:
+                    self._monitor.poll(self._inference, can_submit=not self._pending_inference)
                 if self.t >= next_level / level_hz:
                     self.bus.publish(
                         "level",
@@ -178,6 +258,9 @@ class Pipeline:
         except Exception as exc:
             if not self._stop.is_set():
                 self._error("source", exc)
+                if self._async_inference:
+                    self.inference_failed = True
+                    self.stop()
         finally:
             self._drain_messages()
             try:
@@ -185,6 +268,16 @@ class Pipeline:
                     self._sound(onset)
             except Exception as exc:
                 self._error("detector.flush", exc)
+            self._poll_inference(wait=True)
+            if self._monitor:
+                if not self._stop.is_set():
+                    self._monitor.poll(wait=True)
+                self._monitor.close()
+            if self._inference is not None:
+                for _, future in self._pending_inference:
+                    future.cancel()
+                self._pending_inference.clear()
+                self._inference.shutdown(wait=False, cancel_futures=True)
             self._call_hooks(self.on_end, self.t, "on_end")
             self._close_source()
             self.bus.publish("session_end", self.t)
@@ -284,14 +377,12 @@ class DialogSession:
         self._actions(self.engine.on_sound(det))
 
     def _block(self, t: float) -> None:
-        from .onset import CLIP_SAMPLES, PRE_SAMPLES, SAMPLE_RATE
-
         batch = self._active
         if batch is not None and batch.virtual_end is not None and t >= batch.virtual_end:
             self._finish(batch, t)
         # The last 0.875 seconds may still contain onsets waiting for clips.
         # Deliver all detections before allowing a response window to expire.
-        watermark = max(0.0, t - (CLIP_SAMPLES - PRE_SAMPLES) / SAMPLE_RATE)
+        watermark = self.pipeline.detection_watermark
         self._actions(self.engine.tick(watermark))
         if self._stop_when_finished and self._active is None:
             snap = self.engine.snapshot()
@@ -310,7 +401,12 @@ class DialogSession:
             self._generation += 1
         # EOF flush has now delivered every remaining onset, so the watermark
         # can reach the actual final sample without discarding late answers.
-        self._actions(self.engine.tick(t))
+        if self.pipeline.inference_failed or (self.pipeline._async_inference and self.pipeline._stop.is_set()):
+            # Missing classifications must not make an incomplete response
+            # look like a valid shorter pattern when EOF closes the window.
+            self.engine.command("reset", t)
+        else:
+            self._actions(self.engine.tick(t))
         snapshot = getattr(self.engine, "snapshot", None)
         if callable(snapshot):
             self.pipeline.bus.publish("state", t, **snapshot())

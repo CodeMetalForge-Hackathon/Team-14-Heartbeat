@@ -127,6 +127,8 @@ onset:
   # Noise-floor estimate before eligible audio history is available, in dBFS.
   initial_floor_dbfs: -50.0
 classifier:
+  # Optional external CLAP service settings; enabled only by profiles/clap.yaml.
+  clap: null
   # Prefer a trained head, then YAMNet, then the dependency-free heuristic.
   name: auto
   # Synthetic sensitivity/FPR tradeoff; recalibrate with real contact recordings.

@@ -216,6 +216,9 @@
   function eventText(event) {
     const d = event.data || {};
     switch (event.type) {
+      case "audio_observation":
+        return `${d.label} · score ${Number(d.score || 0).toFixed(2)}${d.alert ? " · Possible distress — review" : ""}${d.transcript ? ` · Heard: ${d.transcript}` : ""}${d.matched_phrases?.length ? ` · HELP_PHRASE: ${d.matched_phrases.join(", ")}` : ""}`;
+      case "audio_monitor_status": return d.message || "Audio monitor status";
       case "sound": {
         const top = d.top?.[0]?.[0];
         return `${d.gated ? "Our prompt / gated sound" : d.candidate ? "Candidate knock" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;

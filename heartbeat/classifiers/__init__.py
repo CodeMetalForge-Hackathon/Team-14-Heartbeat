@@ -8,6 +8,7 @@ import sys
 
 from ..classify import register
 from .heuristic import HeuristicClassifier
+from .clap import ClapClassifier
 
 _LOG = logging.getLogger(__name__)
 
@@ -75,3 +76,4 @@ register("heuristic", HeuristicClassifier)
 register("yamnet", lambda cfg: AutoClassifier(cfg, preferred="yamnet"))
 register("head", lambda cfg: AutoClassifier(cfg, preferred="head"))
 register("auto", AutoClassifier)
+register("clap", ClapClassifier)

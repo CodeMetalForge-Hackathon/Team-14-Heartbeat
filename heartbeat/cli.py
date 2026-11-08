@@ -68,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--wav", type=Path, help="process a WAV without a microphone")
     listen.add_argument("--profile", default="rubble")
     listen.add_argument("--realtime", action="store_true", help="pace WAV replay")
-    listen.add_argument("--debug", action="store_true", help="print the first 200 raw stick serial bytes")
+    listen.add_argument("--debug", action="store_true", help="print stick serial diagnostics and top classifier descriptions")
     record = commands.add_parser("record", help="record labeled 16 kHz PCM audio")
     record.add_argument("--label", required=True, choices=["knock", "other", "bg", "self"])
     record.add_argument("--surface", required=True)
@@ -163,12 +163,26 @@ def _bar(dbfs: float, cfg) -> str:
 
 
 class _ListenConsole:
-    def __init__(self, cfg):
+    def __init__(self, cfg, *, debug=False):
         self.cfg = cfg
+        self.debug = debug
         self.next_level = 0
 
     def __call__(self, event) -> None:
         data = event.data
+        if event.type == "audio_observation":
+            flag = " POSSIBLE DISTRESS — review" if data["alert"] else ""
+            print(f"{event.t:8.2f}s  {data['label']} score {data['score']:.2f}{flag}", flush=True)
+            if data.get("transcript"):
+                print(f"          Heard: {data['transcript']}", flush=True)
+            if data.get("matched_phrases"):
+                print(f"          HELP_PHRASE: {', '.join(data['matched_phrases'])}", flush=True)
+            if self.debug:
+                print(f"          Vocal scores: {data['scores']}", flush=True)
+            return
+        if event.type == "audio_monitor_status":
+            print(f"{event.t:8.2f}s  {data['message']} (skipped {data['skipped']})", flush=True)
+            return
         if event.type == "sound":
             label = "GATED" if data["gated"] else ("KNOCK" if data["is_knock"] else "REJECTED")
             line = (
@@ -183,6 +197,9 @@ class _ListenConsole:
             if (data["gated"] or not data["is_knock"]) and sys.stdout.isatty():
                 line = f"\033[2m{line}\033[0m"
             print(line, flush=True)
+            if self.debug:
+                for label, score in (data.get("top") or [])[:3]:
+                    print(f"          {score:.3f}  {label}", flush=True)
         elif event.type == "level" and event.t >= self.next_level * self.cfg.console_level_s:
             print(
                 f"{event.t:8.2f}s  {_bar(data['dbfs'], self.cfg)} "
@@ -222,14 +239,16 @@ def _devices(bus) -> int:
 
 def _listen(args, profile, bus) -> int:
     cfg = profile.audio
-    bus.subscribe(_ListenConsole(cfg))
+    bus.subscribe(_ListenConsole(cfg, debug=args.debug))
+    # Validate the optional inference service before opening microphone/serial.
+    classifier = make_classifier(profile, bus=bus)
     source = (
         WavSource(args.wav, realtime=args.realtime, block=cfg.block)
         if args.wav is not None
         else open_input(args.device, cfg, bus, **({"debug": True} if args.debug else {}))
     )
     pipeline = Pipeline(
-        source, OnsetDetector(profile.onset), make_classifier(profile, bus=bus), bus, profile
+        source, OnsetDetector(profile.onset), classifier, bus, profile
     )
     failed = []
     bus.subscribe(
