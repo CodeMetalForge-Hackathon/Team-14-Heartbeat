@@ -104,6 +104,32 @@ inspection and verified motor-power isolation, followed by reliable controller
 identity/STOP replies before firmware installation and a controlled motor test.
 Repeated identical PING/upload attempts have not resolved the fault.
 
+## Initial host-side diagnosis after the incident
+
+Read-only host inspection found the correct `1a86:7523` CH340 adapter using the
+Linux `ch341` driver, on kernel `6.18.60+rpt-rpi-2712`. Its USB runtime power state
+was active and it enumerated at 12 Mbit/s. No process owned the rover tty at the
+inspection time. ModemManager was running, but its journal reported that the
+adapter was unsupported; that is not proof that it never probed the device.
+No competing patrol or uploader was found. `vcgencmd get_throttled` returned
+`0x0`; this describes the Pi and does not establish the rover's power quality.
+
+The installed pyserial 3.5 code configures raw serial input and disables PARMRK
+error marking. More importantly, the Raspberry Pi 6.18 driver source uses the
+generic bulk receive path without per-byte framing/BREAK tagging. Consequently,
+merely enabling PARMRK would not reliably distinguish genuine UART zero data
+from an electrical BREAK condition on this adapter. The generic Linux terminal
+explanation is a possible mechanism in general, not an established cause here.
+Sources: [CH341 driver](https://raw.githubusercontent.com/raspberrypi/linux/rpi-6.18.y/drivers/usb/serial/ch341.c),
+[generic receive path](https://raw.githubusercontent.com/torvalds/linux/v6.18/drivers/usb/serial/generic.c).
+
+USB monitoring was enabled on the Pi, but no new serial connection or raw
+transfer experiment was started. Confirmation that both motor leads are
+physically disconnected is pending. A filtered raw USB trace can establish
+whether zeros already arrive in the adapter's USB payload; it cannot by itself
+distinguish intentional MCU output from an electrical problem at the adapter's
+UART input. That distinction may require physical signal measurement.
+
 ## Validation scope
 
 The earlier full suite passed 920 tests before the continuous-mode change.
