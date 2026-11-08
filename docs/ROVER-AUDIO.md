@@ -256,3 +256,21 @@ The C++ harness needs a C++17 compiler and supports `--compiler` and `--sysroot`
 for local toolchain setup. It compiles the actual sketch against fake I/O and
 exercises obstacles, unknown range, search limits, STOP, watchdog, stalls, and
 completion. These checks do not validate physical obstacle detection or braking.
+
+
+## Repeating knock patrol
+
+`clap-knocks` enables `rover.repeat_route` and
+`rover.audio_stop.resume_after_confirmed`. A finite DRIVE route repeats until
+operator stop or a hardware fault. Each cycle has distinct result names.
+Knock candidates stop motion for fresh stationary verification and the normal
+deterministic challenge. Only a CONFIRMED result automatically continues, after
+prompt playback and its gate tail finish. Unconfirmed/no-response/audio-error
+results stay in REVIEW; manual Resume advances to the next segment. Pauses,
+E-STOP, serial failures and encoder stalls retain their existing behavior.
+
+This DRIVE mode has no obstacle detection. Supervise it and keep the path clear.
+Each segment remains bounded by firmware limits; there may be a brief stop
+between segments. The policy does not repair encoder or microphone faults.
+Restart the patrol process to load profile/code changes; no firmware upload is
+needed. Set both options to false to restore finite routes with manual review.

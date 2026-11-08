@@ -1,14 +1,20 @@
 # Knock-triggered patrol. Inherits omitted settings from rubble.yaml.
 # Compatible with the running clap-distress service on port 8767.
 rover:
+  # Repeat the finite route until an operator stop or a hardware fault.
+  repeat_route: true
   audio_stop:
+    # Automatically continue only after deterministic person confirmation.
+    resume_after_confirmed: true
     # Applies only to hb patrol; hb listen/run never issue motor commands.
     enabled: true
-    # Only accepted knock classifications may interrupt movement.
+    # Only classified knock candidates may interrupt movement.
     trigger_mode: knocks
     # Continue through route checkpoints without scheduled audio investigations.
     scheduled_listen: false
-    # One accepted knock requests STOP; classification threshold remains unchanged.
+    # Investigation cutoff while moving; stationary verification stays at 0.6.
+    moving_knock_threshold: 0.5
+    # One candidate requests STOP; dialog classification remains unchanged.
     knock_count: 1
 classifier:
   # Explicit selection; does not change the default Pi/YAMNet/heuristic path.

@@ -15,7 +15,7 @@
     <header class="masthead">
       <div class="identity">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <div><div class="wordmark">HEARTBEAT</div><div class="eyebrow">SEARCH STATION</div></div>
+        <div><div class="wordmark">HEARTBEAT</div><div class="eyebrow">RESCUE OPERATIONS</div></div>
       </div>
       <div id="connection" class="connection"><span class="connection-dot"></span><span id="connection-label">Connecting</span></div>
     </header>
@@ -28,14 +28,28 @@
     </div>
 
     <main>
+      <section id="mission" class="mission" data-tone="neutral" aria-labelledby="mission-title">
+        <div class="eyebrow">LIVE OPERATION</div>
+        <h2 id="mission-title" aria-live="polite">Connecting to rover</h2>
+        <p id="mission-instruction">Waiting for live status. Movement cannot yet be verified.</p>
+        <ol class="mission-steps" aria-label="Detection sequence">
+          <li id="step-search">01 <span>Search</span></li><li id="step-stop">02 <span>Stop & listen</span></li>
+          <li id="step-verify">03 <span>Challenge</span></li><li id="step-confirm">04 <span>Confirm person</span></li>
+        </ol>
+      </section>
+      <div class="signal-summary" aria-label="Session summary">
+        <div><span>ROVER</span><strong id="summary-motion">Unknown</strong></div>
+        <div><span>KNOCK SIGNAL</span><strong id="summary-signal">Waiting</strong></div>
+        <div><span>CONFIRMED FINDINGS</span><strong id="summary-confirmed">0</strong></div>
+      </div>
       <section id="status-card" class="status-card" aria-labelledby="status-title">
         <div class="status-main">
-          <div class="eyebrow">SIGNAL STATUS <span id="status-beacon" class="status-beacon" aria-hidden="true"></span></div>
+          <div class="eyebrow">PERSON DETECTION <span id="status-beacon" class="status-beacon" aria-hidden="true"></span></div>
           <h1 id="status-title" aria-live="polite">AWAITING DATA</h1>
           <p id="phase">Connecting to the sentinel…</p>
         </div>
         <div class="evidence-summary">
-          <p class="odds-label">Chance this is random:</p>
+          <p class="odds-label">Background-match estimate</p>
           <strong id="odds">—</strong>
           <p class="model-note">Estimate assumes independent background knocks.</p>
           <span id="approval-badge" class="approval-badge" hidden></span>
@@ -44,36 +58,37 @@
 
       <section id="patrol-panel" class="panel patrol-panel" aria-labelledby="patrol-title" hidden>
         <div class="patrol-heading">
-          <div><span class="eyebrow">ROVER PATROL</span><h2 id="patrol-title">Stop. Settle. Listen.</h2><p id="patrol-progress">Waiting for the route</p></div>
+          <div><span class="eyebrow">ROVER PATROL</span><h2 id="patrol-title">Rover control</h2><p id="patrol-progress">Waiting for the route</p></div>
           <button type="button" id="estop-button" class="estop-button">E-STOP<span>Stop rover immediately</span></button>
         </div>
         <dl class="patrol-telemetry" aria-label="Rover state">
           <div><dt>Patrol</dt><dd id="patrol-state" aria-live="polite">—</dd></div>
-          <div><dt>Current gap</dt><dd id="patrol-gap">—</dd></div>
+          <div><dt>Current segment</dt><dd id="patrol-gap">—</dd></div>
           <div><dt>Motors</dt><dd id="patrol-motors">—</dd></div>
           <div><dt>Battery</dt><dd id="patrol-battery">—</dd></div>
         </dl>
         <p id="patrol-arrival-warning" class="patrol-warning" role="status" hidden>Arrival unverified: travel was interrupted. This finding belongs to the stopped position.</p>
         <p id="patrol-audio" role="status">Waiting for audio observations.</p>
-        <div class="table-wrap">
+        <details class="disclosure"><summary>Findings & route history</summary><div class="table-wrap">
           <table class="patrol-table">
             <thead><tr><th scope="col">Gap</th><th scope="col">Status</th><th scope="col">Chance random</th><th scope="col">Answers</th><th scope="col">Operator approval</th></tr></thead>
             <tbody id="patrol-body"><tr class="empty-row"><td colspan="5">The route will appear when patrol starts.</td></tr></tbody>
           </table>
         </div>
+        </details>
         <div class="patrol-footer">
           <div class="patrol-buttons" aria-label="Patrol controls">
             <button type="button" data-patrol-command="pause" disabled>Pause</button>
             <button type="button" data-patrol-command="resume" disabled>Resume</button>
             <button type="button" data-patrol-command="abort" class="quiet-button" disabled>Abort patrol</button>
           </div>
-          <p id="patrol-feedback" class="command-feedback" role="status" aria-live="polite">The rover stops before listening at each gap.</p>
+          <p id="patrol-feedback" class="command-feedback" role="status" aria-live="polite">Pause travel, resume after review, or stop the patrol.</p>
         </div>
       </section>
 
       <section class="trace-panel panel" aria-labelledby="trace-title">
         <div class="panel-heading">
-          <div><h2 id="trace-title">Listen. Ask. Answer.</h2><p id="trace-subtitle">Live audio · last 20 seconds</p></div>
+          <div><h2 id="trace-title">Live microphone</h2><p id="trace-subtitle">Live audio · last 20 seconds</p></div>
           <span id="meter-value" class="meter-value">— dBFS</span>
         </div>
         <div class="trace-wrap">
@@ -90,6 +105,7 @@
         </div>
       </section>
 
+      <details class="disclosure advanced-controls"><summary>Additional operator controls</summary>
       <section class="controls" aria-label="Operator controls">
         <div class="operator-identity">
           <label for="current-operator">Operator initials <span>(optional for all quiet)</span></label>
@@ -106,6 +122,7 @@
         <p id="command-feedback" class="command-feedback" role="status" aria-live="polite">Controls become available when the sentinel connects.</p>
       </section>
 
+      </details>
       <div class="details-grid">
         <section class="panel rounds-panel" aria-labelledby="rounds-title">
           <div class="panel-heading"><h2 id="rounds-title">Challenge rounds</h2><span id="round-count" class="small-label">No rounds yet</span></div>
@@ -127,10 +144,12 @@
         </section>
       </div>
 
+      <details class="disclosure event-details"><summary>Technical event log</summary>
       <section class="panel event-panel" aria-labelledby="events-title">
         <div class="panel-heading"><div><h2 id="events-title">Event log</h2><p>Prompts, sounds, and decisions</p></div><span id="event-count" class="small-label">WAITING FOR EVENTS</span></div>
         <ol id="event-log"><li class="empty-log">The sentinel’s activity will appear here.</li></ol>
       </section>
+      </details>
     </main>
 
     <footer><span id="blackbox-status">Black box: connecting…</span><span>Noise doesn’t answer. People do.</span></footer>

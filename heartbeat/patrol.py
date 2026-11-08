@@ -83,6 +83,13 @@ class Patrol:
             raise ValueError("rover.audio_stop.enabled must be boolean")
         self.trigger_mode = self.audio_stop.get("trigger_mode", "all")
         self.scheduled_listen = self.audio_stop.get("scheduled_listen", True)
+        self.moving_knock_threshold = self.audio_stop.get("moving_knock_threshold")
+        if self.moving_knock_threshold is not None and (
+                isinstance(self.moving_knock_threshold, bool)
+                or not isinstance(self.moving_knock_threshold, (int, float))
+                or not math.isfinite(self.moving_knock_threshold)
+                or not 0 < self.moving_knock_threshold <= 1):
+            raise ValueError("rover.audio_stop.moving_knock_threshold must be in (0, 1]")
         if self.trigger_mode not in {"all", "knocks"}:
             raise ValueError("rover.audio_stop.trigger_mode must be all or knocks")
         if not isinstance(self.scheduled_listen, bool):
@@ -120,6 +127,16 @@ class Patrol:
         self._explore_move = None
         self.results = []
         self.state = "IDLE"
+        self.repeat_route = self.cfg.get("repeat_route", False)
+        self.resume_after_confirmed = self.audio_stop.get("resume_after_confirmed", False)
+        for name, value in (("repeat_route", self.repeat_route),
+                            ("audio_stop.resume_after_confirmed", self.resume_after_confirmed)):
+            if not isinstance(value, bool):
+                raise ValueError(f"rover.{name} must be boolean")
+        if self.repeat_route and not any(value != 0 for gap in self.route for _, value in gap["moves"]):
+            raise ValueError("Repeating routes require a nonzero move")
+        self._route_cycle = 1
+        self._auto_continue_pending = False
         self.gap_index = -1
         self.battery = None
         self.done = False
@@ -204,7 +221,18 @@ class Patrol:
             label = "HELP_PHRASE" if data.get("matched_phrases") else data["label"]
         elif event.type == "sound":
             # Passthrough accepts every bump; it must never drive this policy.
-            if not data.get("is_knock") or data.get("classifier") in {None, "none"}:
+            if data.get("classifier") in {None, "none"}:
+                return None
+            accepted = bool(data.get("is_knock"))
+            # A weaker CLAP candidate may stop travel, but cannot verify a
+            # stationary knock or count as a dialog answer.
+            if (self.state == "MOVING" and data.get("classifier") == "clap"
+                    and self.moving_knock_threshold is not None):
+                score = data.get("score")
+                accepted = (isinstance(score, (int, float))
+                            and not isinstance(score, bool) and math.isfinite(score)
+                            and self.moving_knock_threshold <= score <= 1)
+            if not accepted:
                 return None
             start = event.t - PRE_SAMPLES / SAMPLE_RATE
             end = start + CLIP_SAMPLES / SAMPLE_RATE
@@ -288,7 +316,10 @@ class Patrol:
 
     @property
     def gap_name(self):
-        return self.route[self.gap_index]["name"] if 0 <= self.gap_index < len(self.route) else None
+        if not 0 <= self.gap_index < len(self.route):
+            return None
+        name = self.route[self.gap_index]["name"]
+        return f"{name} / cycle {self._route_cycle}" if self.repeat_route else name
 
     def _dialog_busy(self):
         engine = self.engine
@@ -397,8 +428,11 @@ class Patrol:
     def _next_gap(self):
         self.gap_index += 1
         if self.gap_index == len(self.route):
-            self._finish("DONE")
-            return
+            if not self.repeat_route:
+                self._finish("DONE")
+                return
+            self.gap_index = 0
+            self._route_cycle += 1
         self._gap_started = self.pipeline.t
         self._move_index = 0
         self._noisy = False
@@ -466,7 +500,12 @@ class Patrol:
         if completion == "reported":
             if ok is not True:
                 self._error("LED update failed")
-            if self.audio_enabled:
+            if (ok is True and self.audio_enabled and self.resume_after_confirmed
+                    and self.results and self.results[-1]["reason"] == "CONFIRMED"
+                    and self.results[-1]["status"] == "CONFIRMED"):
+                # Wait for physical prompts and their audio tail before restarting.
+                self._auto_continue_pending = True
+            elif self.audio_enabled:
                 self._emit_state("REVIEW")
             else:
                 self._next_gap()
@@ -513,7 +552,14 @@ class Patrol:
             return
         if self._gate_started is not None:
             self.engine.gate_until(math.inf)
-        if self.state == "STOPPING" and t >= self._deadline:
+        if (self.state == "REPORTING" and self._auto_continue_pending
+                and not self._halted and not self._dialog_busy()
+                and t >= self._prompt_gate_until):
+            self._auto_continue_pending = False
+            self.pipeline.bus.publish("operator", t, command="resume", source="confirmed_policy")
+            self._engine_command("reset")
+            self._next_gap()
+        elif self.state == "STOPPING" and t >= self._deadline:
             self._audio_fault("STOP acknowledgement timed out; motion remains locked")
         elif self.state == "MOVING":
             if self._dialog_busy():
@@ -593,6 +639,7 @@ class Patrol:
 
     def _invalidate(self):
         with self._control_lock:
+            self._auto_continue_pending = False
             self._halted = True
             self._generation += 1
             return self._generation
@@ -660,7 +707,7 @@ class Patrol:
             # The result is tied to the actual stopped position. Never replay
             # the remainder of an interrupted move with an unknown distance.
             self._paused_phase = None
-            if self.exploring:
+            if self.exploring and not self.repeat_route:
                 self.route.append({"name": f"Explore {len(self.route) + 1}",
                                    "moves": list(self.route[0]["moves"])})
             self._next_gap()

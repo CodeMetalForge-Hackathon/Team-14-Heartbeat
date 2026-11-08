@@ -198,3 +198,62 @@ dialog input { width: 100%; border: 1px solid var(--slate); background: rgba(237
   .estop-button { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* Operations view: current action first, evidence second, diagnostics on demand. */
+:root { --ink: #0c141b; --panel: #131f29; --paper: #edf5fa; --slate: #a6b8c5; --rescue: #ff8d82; }
+.shell { max-width: 1320px; }
+.masthead { min-height: 88px; }
+.session-strip { opacity: .85; }
+main { padding-top: 24px; }
+.mission { --accent: #a6b8c5; padding: 30px 32px 0; border: 1px solid var(--line); border-top: 4px solid var(--accent); border-radius: 12px; background: var(--panel); }
+.mission[data-tone="moving"] { --accent: #8ecbff; }
+.mission[data-tone="attention"] { --accent: #ffd380; }
+.mission[data-tone="confirmed"] { --accent: #78e4b2; }
+.mission[data-tone="danger"] { --accent: #ff8d82; }
+.mission h2 { font-size: clamp(30px, 4.3vw, 56px); font-weight: 750; letter-spacing: -.04em; line-height: 1.15; margin: 12px 0; color: var(--accent); }
+#mission-instruction { font-size: 17px; line-height: 1.6; color: #d4e0e8; max-width: 850px; margin: 0 0 28px; }
+.mission-steps { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0; margin: 0; list-style: none; border-top: 1px solid var(--line); }
+.mission-steps li { padding: 17px 8px; color: var(--slate); font: 11px var(--mono); border-bottom: 3px solid transparent; }
+.mission-steps span { font: 500 14px var(--body); margin-left: 9px; }
+.mission-steps .active { color: var(--accent); border-color: var(--accent); }
+.signal-summary { display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 16px; margin: 18px 0; }
+.signal-summary > div { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; }
+.signal-summary span { display: block; color: var(--slate); font: 10px var(--mono); letter-spacing: .09em; margin-bottom: 10px; }
+.signal-summary strong { font-size: clamp(18px, 2vw, 25px); font-weight: 650; }
+#summary-confirmed { color: #78e4b2; }
+.status-card { padding: 18px 24px; margin: 20px 0; background: transparent; border-left-width: 3px; }
+.status-card h1 { font-size: clamp(24px, 3vw, 36px); }
+.status-card.confirmed, .status-card.confirmed h1 { border-color: #78e4b2; color: #78e4b2; }
+#odds { font-size: 24px; }
+.panel { border-radius: 10px; }
+.patrol-heading h2 { font-size: 24px; }
+.patrol-heading { padding-bottom: 12px; }
+.patrol-telemetry dd { font: 600 17px var(--body); }
+.patrol-telemetry dt { font-size: 12px; }
+#patrol-audio { margin: 10px 22px 18px; font-size: 13px; color: var(--slate); }
+.patrol-footer { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.patrol-buttons button { min-width: 112px; min-height: 48px; font-size: 15px; }
+button[data-patrol-command="resume"] { background: #25493e; border-color: #64b795; }
+.estop-button { border-radius: 8px; min-height: 68px; font-size: 25px; }
+.disclosure { border: 1px solid var(--line); border-radius: 8px; margin: 18px 0; }
+.disclosure summary { cursor: pointer; padding: 16px 20px; color: var(--slate); font-size: 14px; font-weight: 600; }
+.disclosure[open] > summary { border-bottom: 1px solid var(--line); color: var(--paper); }
+.patrol-panel > .disclosure { margin: 16px 22px; }
+.advanced-controls .controls { padding: 0 20px; }
+.event-details .event-panel { margin: 0; border: 0; }
+.trace-panel { margin-bottom: 20px; }
+#trace { height: 170px; }
+.details-grid { margin-top: 20px; }
+@media (max-width: 760px) {
+  .mission { padding: 22px 20px 0; }
+  .mission-steps { grid-template-columns: 1fr 1fr; }
+  .mission-steps li { padding: 12px 0; }
+  .signal-summary { grid-template-columns: 1fr; gap: 8px; }
+  .signal-summary > div { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 15px 18px; }
+  .signal-summary span { margin: 0; }
+  .signal-summary strong { font-size: 18px; text-align: right; }
+  #mission-instruction { font-size: 15px; }
+  .patrol-footer { gap: 8px; }
+  .patrol-buttons { width: 100%; }
+  .patrol-buttons button { min-width: 0; flex: 1; }
+}

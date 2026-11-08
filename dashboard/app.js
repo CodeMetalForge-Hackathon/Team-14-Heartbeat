@@ -32,6 +32,7 @@
     byId("connection").className = `connection ${mode}`;
     text("connection-label", label);
     controls();
+    renderMission();
   }
   function feedback(message, error = false) {
     text("command-feedback", message);
@@ -117,8 +118,11 @@
     const battery = patrol.battery;
     text("patrol-battery", typeof battery === "number" && Number.isFinite(battery) && battery >= 0 ? `${battery.toFixed(2)} V` : "—");
     byId("patrol-arrival-warning").hidden = !patrol.arrival_unverified;
-    const results = patrol.results || [], route = patrol.route || results.map(result => ({name: result.gap}));
-    text("patrol-progress", `${results.length} of ${route.length} gaps recorded`);
+    const results = patrol.results || [];
+    const namesInOrder = [...new Set([...results.map(result => result.gap), ...(patrol.gap ? [patrol.gap] : []),
+      ...(results.length || patrol.gap?.includes(" / cycle ") ? [] : (patrol.route || []).map(gap => gap.name))])];
+    const route = namesInOrder.map(name => ({name}));
+    text("patrol-progress", `${results.length} investigations recorded · ${patrol.gap || "Waiting"}`);
     const body = byId("patrol-body"), names = new Set(route.map(gap => gap.name));
     for (const [name, row] of patrolRows) {
       if (!names.has(name)) { row.remove(); patrolRows.delete(name); }
@@ -152,6 +156,48 @@
     });
     patrolControls();
   }
+  function renderMission() {
+    const patrol = state?.patrol;
+    const results = patrol?.results || [];
+    const confirmed = results.filter(item => item.status === "CONFIRMED").length;
+    let title = "Listening for knocks", instruction = "No person confirmed. No response does not mean nobody is there.", tone = "neutral", step = "search";
+    if (patrol) {
+      const phases = {
+        MOVING: ["Searching · rover moving", "Listening for knock candidates. A qualifying signal requests a stop.", "moving", "search"],
+        STOPPING: ["Knock heard · stopping", "Waiting for the rover to acknowledge STOP.", "attention", "stop"],
+        SETTLING: ["Stopped · letting motors settle", "Wait for verification before making another knock.", "attention", "stop"],
+        VERIFYING: ["Stopped · listening again", "Knock again near the microphone. Fresh audio is needed to verify the signal.", "attention", "stop"],
+        LISTENING: ["Checking for a person", "Listen to the spoken instructions. Answer only after the prompt finishes.", "attention", "verify"],
+        REVIEW: ["Stopped · review needed", "Review the finding below. Resume continues to the next segment.", "attention", "verify"],
+        PAUSED: ["Patrol paused", "The rover is holding. Use Resume when ready.", "neutral", "search"],
+        REPORTING: ["Recording the finding", "Saving the result before the next patrol action.", "neutral", "verify"],
+        DONE: ["Patrol complete", "This route has ended. Findings remain available below.", "neutral", "search"],
+        ABORTED: ["Patrol stopped", "The run was aborted. Check the event log before restarting.", "danger", "search"],
+        ESTOP: ["Emergency stop", "Motion is locked. Check the rover before restarting the pipeline.", "danger", "search"],
+        FAULT: ["Rover fault", "Movement cannot be verified. Check the rover and event log.", "danger", "search"]
+      };
+      [title, instruction, tone, step] = phases[patrol.estopped ? "ESTOP" : patrol.state] || [patrolPhase(patrol), instruction, tone, step];
+    }
+    if (state?.state === "RESPONSE_WINDOW" && (!patrol || patrol.state === "LISTENING")) {
+      title = "Your turn · answer now"; instruction = `Round ${state.round}: repeat the requested knock pattern.`; tone = "attention"; step = "verify";
+    }
+    if (state?.status === "CONFIRMED" && (!patrol || ["LISTENING", "REPORTING", "REVIEW"].includes(patrol.state))) {
+      title = "Person confirmed"; instruction = "The response matched the changing knock patterns. The finding is recorded below."; tone = "confirmed"; step = "confirm";
+    }
+    if (patrol?.fault) { title = "Rover fault · motion unverified"; instruction = String(patrol.fault); tone = "danger"; }
+    if (state?.pipeline_running === false) { title = "Session ended"; instruction = "Live monitoring has stopped. Review the recorded findings below."; tone = "neutral"; }
+    if (!connected) { title = "Live connection lost"; instruction = "Displayed readings may be old. Rover movement cannot be verified from this page."; tone = "danger"; }
+    text("mission-title", title); text("mission-instruction", instruction);
+    byId("mission").dataset.tone = tone;
+    for (const name of ["search", "stop", "verify", "confirm"]) {
+      const node = byId(`step-${name}`);
+      node.classList.toggle("active", connected && name === step);
+      if (connected && name === step) node.setAttribute("aria-current", "step"); else node.removeAttribute("aria-current");
+    }
+    text("summary-motion", !connected ? "Unknown · offline" : !patrol ? "Not connected" : patrol.fault ? "Unverified" : patrol.state === "STOPPING" ? "Stopping…" : patrol.moving ? "Moving" : "Stopped");
+    text("summary-signal", !connected ? "Last data only" : patrol?.verified_cue ? "Verified while stopped" : patrol?.trigger ? "Candidate heard" : "Listening");
+    text("summary-confirmed", patrol ? confirmed : state?.status === "CONFIRMED" ? 1 : 0);
+  }
   function phaseLabel(snapshot) {
     if (snapshot.pipeline_running === false) return "Session ended · recording available for review";
     if (snapshot.coaching) return "Hearing knocks: asking them to listen.";
@@ -172,7 +218,7 @@
     text("uptime", clock(now));
     const status = state.status || "NO_SIGNS";
     byId("status-card").className = `status-card ${status.toLowerCase()}`;
-    text("status-title", status.replaceAll("_", " "));
+    text("status-title", ({NO_SIGNS: "No person confirmed", POSSIBLE: "Possible person", CONFIRMED: "Person confirmed"})[status] || status);
     text("phase", phaseLabel(state));
     text("odds", state.odds);
     const badge = byId("approval-badge");
@@ -194,6 +240,7 @@
         : `Black box: ${Number(box.events || 0).toLocaleString()} events, hash-chained.`);
     }
     renderPatrol();
+    renderMission();
     controls();
   }
   function renderRounds(rounds) {
@@ -228,9 +275,10 @@
         return `${d.label} · score ${Number(d.score || 0).toFixed(2)}${d.alert ? " · Possible distress — review" : ""}${d.transcript ? ` · Heard: ${d.transcript}` : ""}${d.matched_phrases?.length ? ` · HELP_PHRASE: ${d.matched_phrases.join(", ")}` : ""}`;
       case "audio_monitor_status": return d.message || "Audio monitor status";
       case "patrol_cue": return `${d.phase === "trigger" ? "Stopping to investigate" : "Fresh stationary evidence"}: ${d.label}`;
+      case "patrol_cue": return event.data.phase === "trigger" ? "Knock candidate · rover stop requested" : "Fresh stationary knock verified";
       case "sound": {
         const top = d.top?.[0]?.[0];
-        return `${d.gated ? "Our prompt / gated sound" : d.candidate ? "Candidate knock" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;
+        return `${d.gated ? "Sound excluded from dialog" : d.candidate ? "Candidate knock" : d.is_knock ? "Knock" : "Other sound"} · score ${Number(d.score || 0).toFixed(2)}${top ? ` · ${top}` : ""}`;
       }
       case "state": return `${String(d.state || "").replaceAll("_", " ")} · ${String(d.status || "").replaceAll("_", " ")}`;
       case "prompt_start": return "Sending prompt" + (d.actions ? ` · ${d.actions.map(a => a.key?.replaceAll("_", " ") || `${a.n} knocks`).join(", ")}` : "");
