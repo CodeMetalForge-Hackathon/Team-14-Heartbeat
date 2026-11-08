@@ -66,6 +66,9 @@ No movement flag exists on `decisions-preview`.
 
 ## Runtime connections
 
+For the connected `teamrover@heartbeat` Pi, see the
+[credential setup, verified device paths and bench results](PI-CONNECTED-CHECK.md).
+
 - Pi 5 CSI camera, with Raspberry Pi OS `rpicam-vid` available.
 - Pi USB to the Auriga rover controller, with the rover's motor power connected.
 - USB contact microphone/stick to the Pi, plus a working speaker for prompts.
@@ -158,8 +161,10 @@ is in flight, and motors remain stopped while waiting for the model. Choices are
 `STOP_AND_LISTEN`; unavailable movement choices are excluded locally.
 
 The model cannot set PWM, distance, angle, duration, thresholds or confirmation.
-Profile defaults assign a 3 cm forward step, a 10 degree turn, 25% speed, and a
-1000 ms action deadline. These are requested bounds, not measured travel accuracy.
+Base profile defaults assign a 3 cm forward step, a 10 degree turn, 25% speed,
+and a 1000 ms action deadline. The `clap-knocks` profile uses 35% following the
+Pi's lifted-track check; see the [bench results](PI-CONNECTED-CHECK.md).
+These are requested bounds, not measured travel accuracy.
 Freshness, confidence, state and sensor checks run again before motion dispatch.
 The model's score is not a calibrated probability that movement is safe.
 

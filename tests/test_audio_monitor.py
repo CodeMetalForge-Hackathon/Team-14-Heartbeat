@@ -255,6 +255,26 @@ def test_patrol_transition_cannot_remove_physical_prompt_gate(profile):
     monitor.close()
 
 
+def test_decision_navigation_transitions_keep_vocal_windows_and_pending_results(profile):
+    monitor, bus, events = make_monitor(profile)
+    phases = ['OBSERVING', 'DECIDING', 'HOLDING', 'MOVING']
+    for i in range(190):
+        if i % 20 == 0:
+            bus.publish('patrol', i * .016, state=phases[(i // 20) % 4], audio_stop_enabled=True)
+        feed(monitor, i, i + 1, poll=False)
+    future = Future()
+    monitor.poll(SimpleNamespace(submit=lambda *args: future))
+    assert monitor.pending is not None
+    bus.publish('patrol', 3.04, state='MOVING', audio_stop_enabled=True)
+    future.set_result(result())
+    monitor.poll()
+    observations = [e for e in events if e.type == 'audio_observation']
+    assert len(observations) == 1
+    assert observations[0].data['possible_distress']
+    assert len(monitor.buffer) == monitor.size
+    monitor.close()
+
+
 def test_clap_degradation_pauses_monitor_and_restore_requires_fresh_audio(profile):
     monitor, bus, events = make_monitor(profile)
     feed(monitor, 0, 190, poll=False)

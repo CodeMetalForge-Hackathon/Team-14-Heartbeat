@@ -49,6 +49,8 @@ def validate_decision_settings(settings):
     try:
         for key in positive:
             _number(cfg[key], key)
+        if cfg.get("forward_budget_cm") is not None:
+            _number(cfg["forward_budget_cm"], "forward_budget_cm")
         if cfg["session_s"] > 600:
             raise ValueError("rover.decisions.session_s must be at most 600 seconds")
         _number(cfg["action_settle_s"], "action_settle_s", positive=False)
@@ -125,6 +127,7 @@ class DecisionsPatrol(Patrol):
         self._latency = None
         self._decision_reason = "not_started"
         self._steps = 0
+        self._forward_commanded_cm = 0.0
         self._history = deque(maxlen=decisions["history_size"])
         self._motion_intent = None
         self._navigation_ready = False
@@ -149,6 +152,8 @@ class DecisionsPatrol(Patrol):
             "latency_s": self._latency, "reason": self._decision_reason,
             "observation_age_s": age, "front_cm": self._last_front_cm,
             "steps": self._steps, "pending": self._pending_observation is not None,
+            "forward_commanded_cm": self._forward_commanded_cm,
+            "forward_budget_cm": self.decision_cfg.get("forward_budget_cm"),
         }
         return snap
 
@@ -246,11 +251,27 @@ class DecisionsPatrol(Patrol):
 
     def _allowed_actions(self, front_cm):
         choices = list(STATIONARY_ACTIONS)
-        if front_cm >= self.cfg["navigation"]["clear_cm"]:
+        if front_cm >= self.cfg["navigation"]["clear_cm"] and self._forward_remaining() > 0:
             choices.append("FORWARD_SHORT")
         if self.allow_turns and front_cm >= self.cfg["navigation"]["turn_clearance_cm"]:
             choices.extend(("TURN_LEFT_SHORT", "TURN_RIGHT_SHORT"))
         return choices
+
+    def _forward_remaining(self):
+        budget = self.decision_cfg.get("forward_budget_cm")
+        return math.inf if budget is None else max(0.0, budget - self._forward_commanded_cm)
+
+    def _submit(self, method, args, completion=None):
+        if method == "step":
+            distance = min(args[0], self._forward_remaining())
+            if distance <= 0:
+                self._request_navigation_stop("budget", "forward_budget_exhausted")
+                return
+            # Charge before dispatch. Canceled/failed steps are not refunded:
+            # their partial physical travel is unknown. Resume keeps this total.
+            self._forward_commanded_cm += distance
+            args = (distance, *args[1:])
+        super()._submit(method, args, completion)
 
     def _prepare_navigation(self, pending):
         if self._stop_now() is not True:
@@ -307,6 +328,8 @@ class DecisionsPatrol(Patrol):
         front = float(reading["cm"])
         telemetry = {"front_cm": front, "moving": False, "armed": self.armed,
                      "allow_turns": self.allow_turns, "steps": self._steps,
+                     "forward_commanded_cm": self._forward_commanded_cm,
+                     "forward_budget_cm": self.decision_cfg.get("forward_budget_cm"),
                      "clear_cm": self.cfg["navigation"]["clear_cm"],
                      "turn_clearance_cm": self.cfg["navigation"]["turn_clearance_cm"],
                      "history": deepcopy(list(self._history))}
@@ -415,14 +438,14 @@ class DecisionsPatrol(Patrol):
         self._decision_event("proposed", allowed_actions=value["allowed"])
         if pending["generation"] != self._generation or self._halted or self.done:
             return
-        if confidence < self.decision_cfg["min_confidence"]:
+        if action == "HOLD":
+            self._hold("model_hold", pending["after"])
+        elif confidence < self.decision_cfg["min_confidence"]:
             self._hold("low_confidence", pending["after"])
         elif action == "STOP_AND_LISTEN":
             self._record_outcome("stop_and_listen")
             self._verification_for_resume = False
             self._request_navigation_stop("investigate", "decisions_stop_and_listen")
-        elif action == "HOLD":
-            self._hold("model_hold", pending["after"])
         elif not self.armed:
             self._hold("motion_disarmed", pending["after"])
         elif self._budget_due():
@@ -491,6 +514,8 @@ class DecisionsPatrol(Patrol):
                                             self._last_frame_at + self.decision_cfg["decision_interval_s"])
             self._emit_state("HOLDING")
             self._decision_event("completed")
+            if self._forward_remaining() <= 0:
+                self._request_navigation_stop("budget", "forward_budget_exhausted")
         elif completion == "reported":
             super()._completed(generation, completion, ok)
             if self._budget_due() and self.state == "REVIEW":
@@ -584,6 +609,8 @@ class DecisionsPatrol(Patrol):
         if (self._session_started_at is not None
                 and monotonic() - self._session_started_at >= self.decision_cfg["session_s"]):
             self._budget_expired = True
+        if self._forward_remaining() <= 0 and self.state not in {"MOVING", "STOPPING"}:
+            self._budget_expired = True
         return self._budget_expired
 
     def _block(self, t):
@@ -662,6 +689,8 @@ class DecisionsPatrol(Patrol):
             self._record_outcome("interrupted")
         self._cancel_observation()
         self._decision_reason = "session_budget_expired" if state == "DONE" and self._budget_expired else state.lower()
+        if state == "DONE" and self._forward_remaining() <= 0:
+            self._decision_reason = "forward_budget_exhausted"
         super()._finish(state)
 
     def close(self):

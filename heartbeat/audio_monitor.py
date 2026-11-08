@@ -85,6 +85,10 @@ class AudioMonitor:
             return
         if event.type == "patrol" and event.data.get("audio_stop_enabled"):
             phase = event.data.get("state")
+            # Camera/decision/short-move transitions are one listening phase.
+            # Resetting each time prevents a three-second window ever filling.
+            if phase in {"OBSERVING", "DECIDING", "HOLDING", "MOVING"}:
+                phase = "NAVIGATING"
             if phase == self.patrol_phase:
                 return  # Status refreshes must not continually reset the window.
             self.patrol_phase = phase

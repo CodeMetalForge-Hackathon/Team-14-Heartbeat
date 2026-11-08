@@ -1,0 +1,121 @@
+# Supervised 50 cm Decisions check; inherits omitted settings from rubble.yaml.
+# Compatible with the running clap-distress service on port 8767.
+rover:
+  decisions:
+    # Accept offered motion proposals scoring at least 0.50 in this supervised test.
+    min_confidence: 0.50
+    # Progress objective for this bounded test; sensor and visual hazards still require HOLD.
+    mission: >-
+      Perform the operator's supervised forward-travel test, progressing toward
+      the forward_budget_cm limit reported in telemetry. Choose FORWARD_SHORT
+      when offered and the camera shows a supported, unobstructed next step.
+      Continue useful progress when no actionable human distress cue is present.
+      The live audio controller independently stops and investigates classified
+      knocks or vocal distress. Choose STOP_AND_LISTEN for a specific visible
+      person signaling for help or another actionable rescue cue; ordinary
+      background people alone do not require an investigation in this test.
+      Choose HOLD for an obstacle, edge, unsupported or uncertain travel surface,
+      conflicting observations, or another concrete reason the next step should
+      not proceed. Never infer path safety from silence. Do not exceed the
+      supplied choices or local guards. No response never means nobody is there.
+    # Pi lifted-track bench: 25% timed out; 35% completed 3 cm within 1 s. Floor test pending.
+    speed_pct: 35
+    # Cap the sum of forward requests; physical distance needs calibration.
+    forward_budget_cm: 50
+    # Finish navigation after at most 60 seconds, even if the model keeps holding.
+    session_s: 60
+  audio_stop:
+    # Applies only to hb patrol; hb listen/run never issue motor commands.
+    enabled: true
+    # Accepted knocks or vocal distress cues request a stationary investigation.
+    trigger_mode: all
+    # Continue through route checkpoints without scheduled audio investigations.
+    scheduled_listen: false
+    # One accepted knock requests STOP; classification threshold remains unchanged.
+    knock_count: 1
+classifier:
+  # Explicit selection; does not change the default Pi/YAMNet/heuristic path.
+  name: clap
+  # Initial relative-score threshold only; calibrate on real short onset clips.
+  threshold: 0.6
+  clap:
+    # Change the host to the Jetson's LAN address for remote inference.
+    endpoint: http://127.0.0.1:8767
+    # Per-request transport timeout; failed inference uses the configured fallback.
+    timeout_s: 1.5
+    # Maximum queued/in-flight onset requests, including the active request.
+    max_pending: 4
+    # Maximum stream-time age from impact to result, including 0.875s look-ahead.
+    max_lag_s: 2.5
+    # Pretrained model already used in the exploratory five-second tester.
+    model: laion/clap-htsat-unfused
+    # Model repository revision; use the same value on service and client.
+    revision: main
+    # CPU on Mac; set cuda for a Jetson with a compatible GPU-enabled PyTorch.
+    device: cpu
+    # Torch CPU threads; benchmark rather than assuming more threads is faster.
+    cpu_threads: 2
+    # These descriptions together define the positive class.
+    positive_prompts:
+      - The sound of a person knocking on a table with their knuckles.
+      - The sound of a person banging on a table with their fist.
+    # Fixed comparison classes; changing descriptions also changes score meaning.
+    negative_prompts:
+      - The sound of an object being dropped or set down on a table.
+      - The sound of a table being accidentally bumped.
+      - The sound of a mechanical motor or servo clicking and tapping.
+      - The sound of footsteps.
+      - The sound of people talking or a speaker playing speech.
+      - The sound of music playing.
+      - The sound of typing on a keyboard.
+      - The sound of quiet background room noise.
+    # Continuous vocal observations; never fed to knock-pattern counting.
+    monitor:
+      # Classify vocal windows alongside impact clips; transcription stays disabled.
+      enabled: true
+      # Duration and interval of overlapping windows, in seconds.
+      window_s: 3.0
+      hop_s: 1.0
+      # Uncalibrated relative class-score cutoff.
+      threshold: 0.55
+      # Skip very quiet windows before classification/transcription.
+      min_dbfs: -50.0
+      # Minimum seconds between review alerts; observations still logged.
+      cooldown_s: 5.0
+      # Bound the monitor HTTP request, including optional transcription.
+      timeout_s: 3.0
+      # Vocal classes and ordinary comparison sounds are separate from knocks.
+      prompts:
+        SCREAM:
+          - The sound of a person screaming.
+        SHOUT:
+          - The sound of a person shouting loudly.
+        CRYING:
+          - The sound of a person crying and sobbing.
+        SPEECH:
+          - The sound of a person speaking normally.
+        # Informational only: breathing does not trigger a distress alert.
+        BREATHING:
+          - The sound of a person breathing in and out.
+          - The sound of a person breathing heavily and panting.
+        OTHER:
+          - The sound of people laughing and cheering.
+          - The sound of music or television playing.
+          - The sound of machinery and motors running.
+          - The sound of knocking or objects banging on a table.
+          - The sound of quiet background room noise.
+          - The sound of wind blowing across a microphone.
+          - The sound of a fan blowing air.
+          - The sound of clothing rustling against a microphone.
+      # Optional English transcription. Off avoids an extra model download.
+      asr:
+        enabled: false
+        model: openai/whisper-tiny.en
+        revision: main
+        # Whole-word phrase matching on normalized transcripts; not proof of distress.
+        phrases:
+          - help
+          - help me
+          - I am trapped
+          - I'm trapped
+          - over here

@@ -540,6 +540,8 @@ rover:
     min_confidence: 0.7
     # Fixed distance assigned to FORWARD_SHORT, in centimeters.
     forward_cm: 3.0
+    # Optional total forward-command budget in cm; interrupted steps are not refunded.
+    forward_budget_cm: null
     # Fixed absolute angle assigned to either turn choice, in degrees.
     turn_deg: 10.0
     # Fixed motor speed for guarded Decisions actions; cannot be set by the model.

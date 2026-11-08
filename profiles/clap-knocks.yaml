@@ -1,6 +1,9 @@
 # Knock-triggered patrol. Inherits omitted settings from rubble.yaml.
 # Compatible with the running clap-distress service on port 8767.
 rover:
+  decisions:
+    # Pi lifted-track bench: 25% timed out; 35% completed 3 cm within 1 s. Floor test pending.
+    speed_pct: 35
   audio_stop:
     # Applies only to hb patrol; hb listen/run never issue motor commands.
     enabled: true
