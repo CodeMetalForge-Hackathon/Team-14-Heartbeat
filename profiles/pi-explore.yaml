@@ -18,6 +18,8 @@ rover:
       enabled: true
       # Nominal gap measured from the ultrasonic sensor face, not proof of contact.
       stop_cm: 3.0
+      # Accept arrival within half a centimeter of the nominal target.
+      arrival_tolerance_cm: 0.5
     # Reserve at most 20 cm per cruise, preserving budget for later directions.
     cruise_chunk_cm: 20
     # Enable a voltage cutoff only after verifying this pack type and ADC calibration.
@@ -29,11 +31,29 @@ rover:
         Start or continue a bounded forward segment within the remaining operator
         distance budget. The host fixes speed and distance, continuously checks
         audio and range, and requests new camera decisions during movement.
+        Prefer this choice while exploring visibly supported, unobstructed ground
+        when forward movement is offered. A distant object beyond clear_cm is
+        not by itself a reason to stop before the next bounded segment.
+      # Keep a stop option for hazards and uncertainty while favoring useful exploration.
+      HOLD: >-
+        Stay stopped, or stop the active segment, and obtain a fresh observation
+        when the image shows a person obstructing travel, an edge, unsupported
+        ground, a blocked path with no visibly supported offered turn, or when
+        evidence is ambiguous, stale or incomplete. The normal destination stop
+        is the close debris target, not an arbitrary distance from it. While
+        aligned debris remains reachable on supported ground and APPROACH_DEBRIS
+        is offered, continue the approach until the close target is reached.
+        Do not HOLD just because the target is within the ordinary forward-start
+        threshold. For inspection on arrival, choose INSPECT_DEBRIS instead.
       APPROACH_DEBRIS: >-
         Approach recognizable debris that is aligned ahead using a short bounded
         forward move. Prefer this over ordinary forward travel when approaching
-        a debris site. Reassess the image after each move; HOLD if alignment,
-        support, identity or the approach path becomes uncertain.
+        a debris site. Continue choosing this while front_cm exceeds
+        debris_stop_cm plus debris_arrival_tolerance_cm and the target remains
+        aligned and reachable. This guarded approach has its own close stopping
+        gap; clear_cm applies to ordinary travel. Reassess the image after each
+        move; HOLD if alignment, support, identity or the approach path becomes
+        uncertain.
       INSPECT_DEBRIS: >-
         Stop and listen at visible debris after the host's close-distance target
         is reached. This choice is unavailable while the target is far away or
@@ -42,20 +62,32 @@ rover:
     min_confidence: 0.50
     # Reach a close debris position before listening; motion stays locally bounded.
     mission: >-
-      Explore the visible supported ground and find debris or rubble worth
-      inspecting. Choose FORWARD_SHORT when offered and the next path is visibly
-      supported and unobstructed. During forward travel it means continue the
+      Actively explore the visible supported ground and find debris or rubble
+      worth inspecting. Prefer progress over repeated HOLD on open ground.
+      The normal inspection destination is debris_stop_cm from aligned debris,
+      measured from the ultrasonic sensor, within debris_arrival_tolerance_cm.
+      Prioritize APPROACH_DEBRIS when recognizable debris is aligned ahead and
+      the approach is offered. Continue toward that same target while the
+      measured gap is larger than the arrival target and the path remains
+      supported and unobstructed. Do not stop just because the debris is within
+      clear_cm: the close approach uses its own stopping gap. On measured
+      arrival with the debris still visible, choose INSPECT_DEBRIS.
+      Otherwise explore. Use front_cm as the measured forward distance in
+      centimeters and clear_cm as the host's ordinary forward-start threshold.
+      When no aligned debris target takes priority, range_valid is true,
+      front_cm is at least clear_cm, and the next offered segment is visibly
+      supported and unobstructed, choose FORWARD_SHORT. A distant object alone
+      is not a reason to HOLD; reassess it as the rover gets closer. Range alone
+      cannot establish traversable ground or exclude people, edges or hazards.
+      During forward travel FORWARD_SHORT means continue the
       active bounded segment. If an ordinary obstacle blocks forward progress,
       choose an offered short turn toward a visibly supported alternative;
       turn proposals during travel first stop the rover and require another
       observation before a turn is dispatched. Never infer side clearance or
       absence of an edge from front ultrasonic distance alone.
-      Choose APPROACH_DEBRIS when recognizable debris or a rubble pile is aligned
-      ahead and that choice is offered. Approach it using the host's short moves,
-      continually checking alignment, support and the target's identity. Choose
-      INSPECT_DEBRIS only after the close target is reached and the debris is
-      still visible. Do not start listening merely because distant debris is
-      visible. The final listening position needs a valid close distance; an
+      Check alignment, support and target identity after each short approach.
+      Do not start listening merely because distant debris is visible.
+      The final listening position needs a valid close distance; an
       unknown echo is never proof of arrival or microphone contact.
       Only close visual debris starts an investigation. Sounds are recorded but do not
       request a stop while exploring. Listen for knock responses after stopping

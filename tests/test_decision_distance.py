@@ -205,8 +205,15 @@ def test_continuous_stale_camera_stops_active_motion(bench):
     controller, rover, tick = bench(continuous=True)
     for _ in range(100):
         tick()
-        if rover.cruises:
+        if controller.state == 'MOVING':
             break
+    # MOVING queues the worker; initial preparation has already set the fake
+    # rover's canceled flag. Wait for the actual cruise before testing expiry,
+    # without advancing the observation clock while the worker is scheduled.
+    deadline = time.monotonic() + 2
+    while not rover.cruises and time.monotonic() < deadline:
+        time.sleep(.001)
+    assert rover.cruises and rover.moving and not rover.cruise_canceled
     controller._next_observation_at = float('inf')
     for _ in range(300):
         tick()
@@ -448,6 +455,47 @@ def test_generic_camera_hold_does_not_claim_debris_detection(bench):
     assert 'Camera requested HOLD' in message
     assert 'debris' not in message.lower()
     assert not rover.steps
+
+
+@pytest.mark.parametrize('front,expected', [
+    (120, 'front distance 120.0 cm'),
+    (-1, 'front distance unavailable'),
+])
+def test_model_hold_reports_measured_distance_in_console_and_stop_card(bench, capsys, front, expected):
+    from heartbeat.cli import _DialogConsole
+
+    controller, rover, tick = bench(exploration=True, choice='HOLD', front=front,
+                                   no_echo_motion=True)
+    controller.pipeline.bus.subscribe(_DialogConsole())
+    for _ in range(100):
+        tick()
+        if controller.snapshot()['decisions']['reason'] == 'model_hold':
+            break
+    snapshot = controller.snapshot()['decisions']
+    output = capsys.readouterr().out
+    assert snapshot['reason'] == 'model_hold'
+    assert expected in snapshot['status_message']
+    assert expected in snapshot['stop_images'][0]['message']
+    assert 'DECISION HOLD' in output and expected in output
+    assert snapshot['front_cm'] == (front if front >= 2 else None)
+    assert not rover.steps and not rover.cruises and not rover.pivots
+
+
+def test_low_confidence_hold_reports_distance_without_overriding_stop(bench, capsys):
+    from heartbeat.cli import _DialogConsole
+
+    controller, rover, tick = bench(exploration=True, front=120,
+                                   choice='FORWARD_SHORT', confidence=.5)
+    controller.pipeline.bus.subscribe(_DialogConsole())
+    for _ in range(100):
+        tick()
+        if controller.snapshot()['decisions']['reason'] == 'low_confidence':
+            break
+    message = controller.snapshot()['decisions']['status_message']
+    assert 'Movement confidence below threshold' in message
+    assert 'front distance 120.0 cm' in message
+    assert 'front distance 120.0 cm' in capsys.readouterr().out
+    assert not rover.steps and not rover.cruises and not rover.pivots
 
 
 def test_stop_reason_is_printed_by_the_console_and_kept_in_snapshot(bench,capsys):
@@ -767,18 +815,25 @@ def test_no_echo_camera_policy_is_explicit_and_requires_exploration(changes):
         validate_decision_settings(cfg)
 
 
-def test_debris_is_approached_before_listening_and_each_step_gets_a_fresh_view(bench):
-    controller, rover, tick = bench(front=9, exploration=True, close_debris=True,
+@pytest.mark.parametrize('front', [9, 30, 75.9])
+def test_debris_is_approached_before_listening_and_each_step_gets_a_fresh_view(bench, front):
+    controller, rover, tick = bench(front=front, budget=100, exploration=True, close_debris=True,
         trigger='debris_only', choice=lambda t: 'INSPECT_DEBRIS' if t['front_cm'] <= 3.5 else 'APPROACH_DEBRIS')
-    for _ in range(200):
+    for _ in range(1000):
         tick()
         if controller.state == 'VERIFYING':
             break
     assert controller.state == 'VERIFYING'
-    assert rover.approaches == [(2, 35, 1000, 3)] * 3
-    assert [t['front_cm'] for t, _ in rover.observations] == [9, 7, 5, 3]
-    assert controller.snapshot()['decisions']['forward_commanded_cm'] == 6
+    assert rover.front == pytest.approx(3)
+    assert sum(a[0] for a in rover.approaches) == pytest.approx(front - 3)
+    assert all(0 < a[0] <= 2 and a[1:] == (35, 1000, 3) for a in rover.approaches)
+    observed = [t['front_cm'] for t, _ in rover.observations]
+    assert observed[0] == front and observed[-1] == pytest.approx(3)
+    assert len(observed) == len(rover.approaches) + 1
+    assert all(a > b for a, b in zip(observed, observed[1:]))
+    assert controller.snapshot()['decisions']['forward_commanded_cm'] == pytest.approx(front - 3)
     assert controller.snapshot()['decisions']['stop_reason'] == 'debris_arrived'
+    assert 'front distance 3.0 cm' in controller.snapshot()['decisions']['stop_message']
     assert not rover.steps and not rover.cruises
 
 

@@ -15,6 +15,27 @@ movement or stop reason creates another card. Restarting the patrol clears
 the gallery. JPEGs are served separately from event JSON
 at `/api/stop-images/{id}` and are not saved in the black-box recording.
 
+HOLD and low-confidence stop messages include the forward ultrasonic distance
+used for that decision, for example `front distance 75.9 cm`. Missing echoes
+are reported as `front distance unavailable`, never as a distant object.
+The distance appears in terminal output, dashboard status, events and the
+retained stop card. A retained card describes its original stop observation;
+it is not a continuously refreshed distance reading.
+
+The `pi-explore` mission asks the existing GPT Decisions client to approach
+aligned debris until the measured gap reaches **3 cm**, with **0.5 cm arrival
+tolerance**, then select `INSPECT_DEBRIS` to stop and listen. This close approach
+uses short moves with a new camera/range check between moves. Its stopping gap
+is separate from the ordinary 45 cm forward-start threshold: being inside
+45 cm is not itself a reason for the model to abandon an offered debris approach.
+Without an aligned debris target, it prefers forward exploration on visibly
+supported, unobstructed ground when movement is offered and the measured distance
+meets `clear_cm`. A distant object alone should not cause HOLD. Nearby ordinary
+obstacles can prompt an offered turn; people,
+edges, uncertain imagery and faults can still require a stop. This is a model
+instruction, not a guarantee of its choice, and it does not override the host's
+confidence, freshness, distance-budget or firmware checks.
+
 If a stop card says **Distance reading unavailable; retrying the sensor**, the
 caption reports a sonar hold, not a debris detection. `cm=-1 valid=0` is an
 unusable echo; the firmware does not report it as an unobstructed path. With

@@ -263,7 +263,7 @@ class DecisionsPatrol(Patrol):
             return ("Knocks detected; investigating the sound" if
                     (self._trigger or {}).get("label") == "KNOCK_BURST" else
                     "Possible distress sound detected; investigating")
-        return {
+        message = {
             "debris_detected": "Camera flagged possible debris; inspecting and listening",
             "debris_arrived": "Close debris target reached; stopping to inspect and listen",
             "debris_not_close": "Debris is not yet at the close target; continuing camera checks",
@@ -295,6 +295,15 @@ class DecisionsPatrol(Patrol):
             "awaiting_decision": "Assessing the camera view and sensor readings",
             "fresh_observation_after_resume": "Checking a fresh observation before continuing",
         }.get(reason, str(reason).replace("_", " "))
+        if reason in {"model_hold", "debris_arrived", "low_confidence", "waiting_for_range",
+                      "debris_range_unknown", "low_battery", "battery_unavailable"}:
+            # This is the measured range accompanying the decision, never a
+            # distance estimated from the image or a substitute for no echo.
+            distance = (f"front distance {self._last_front_cm:.1f} cm"
+                        if _finite_number(self._last_front_cm) else
+                        "front distance unavailable")
+            message += " · " + distance
+        return message
 
     def _status_message(self):
         if self.state == "PAUSED":
