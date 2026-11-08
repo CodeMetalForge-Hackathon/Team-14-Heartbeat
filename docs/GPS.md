@@ -61,6 +61,17 @@ open sky and repeat the existing diagnostic. If acquisition still fails there,
 verify the exact carrier's antenna bias circuit and the SMA/u.FL connections.
 Both software readers exited and released the serial port after these tests.
 
+### Window-position recheck
+
+After the operator reported moving closer to a window, the same receive-only
+checker ran for 60.11 seconds. It received 721 valid NMEA sentences with zero
+invalid sentences. All reported constellation visibility counts remained zero,
+with zero satellites used, fix quality 0, RMC V and HDOP 99.99. It exited with
+the documented no-fix status `2` and released the port. This sample did not
+demonstrate improved acquisition or a usable position. Antenna supply, connector
+integrity and open-sky performance remain unmeasured; the result alone does not
+isolate which RF/environmental limitation is responsible.
+
 ## Repeat the check (human-operated)
 
 Connect the GNSS antenna required by the carrier board and provide a clear view

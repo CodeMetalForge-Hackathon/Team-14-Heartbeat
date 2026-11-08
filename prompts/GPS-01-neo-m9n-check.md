@@ -27,3 +27,7 @@ The operator subsequently confirmed the antenna was indoors away from a
 window and could not move it during the test. Record measured reception and
 fix status without claiming that an indoor no-fix result validates or rules
 out an electrical antenna problem.
+
+Window-position retest request:
+
+> i moved closer to the window test once more pls
